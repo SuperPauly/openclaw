@@ -1,0 +1,21 @@
+name: Sync from OpenClaw upstream
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    steps:
+      - name: Sync main branch from openclaw/openclaw
+        uses: repo-sync/github-sync@v2
+        with:
+          source_repo: "https://github.com/openclaw/openclaw"
+          source_branch: "main"
+          destination_branch: "main"
+          github_token: ${{ secrets.GITHUB_TOKEN }}

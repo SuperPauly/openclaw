@@ -10,6 +10,11 @@ on:
     paths:
       - "apps/android/**"
       - "apps/shared/**"
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Sync from OpenClaw upstream"]
+    types: [completed]
   workflow_dispatch:
 
 concurrency:
@@ -19,6 +24,7 @@ concurrency:
 jobs:
   build-apk:
     name: Build debug APK
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
