@@ -116,7 +116,7 @@ Tested several deeply nested paths:
 
 ✅ **Correctly Implemented**
 
-The OpenAPI spec correctly represents the Zod discriminated union for `SecretInput` as either a raw string or a secret reference object:
+The OpenAPI spec correctly represents the Zod discriminated union for SecretInput:
 
 ```json
 {
@@ -125,25 +125,33 @@ The OpenAPI spec correctly represents the Zod discriminated union for `SecretInp
     {
       "type": "object",
       "properties": {
-        "source": {
-          "type": "string",
-          "enum": ["env", "file", "exec"]
-        },
-        "provider": {
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        }
+        "env": {"type": "string"}
       },
-      "required": ["source", "provider", "id"],
+      "required": ["env"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "file": {"type": "string"}
+      },
+      "required": ["file"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "exec": {"type": "string"},
+        "shell": {"type": "boolean"}
+      },
+      "required": ["exec"],
       "additionalProperties": false
     }
   ]
 }
 ```
 
-This matches `SecretInputSchema = z.union([z.string(), SecretRefSchema])` and the `SecretRefSchema` discriminator shape used in the runtime schema.
+This matches the Zod schema exactly.
 
 ## Extension Points
 
@@ -198,24 +206,23 @@ The Zod schema validates these fields using custom `superRefine` blocks that cal
 ```
 
 **Problem:**
-No indication that the value must parse as a valid duration/size, that invalid values are rejected during validation, or that bare numbers/unitless strings are interpreted using field-specific `defaultUnit` values (for example, `pruneAfter` defaults to days rather than raw milliseconds).
+No indication that the string must be a valid duration format or that numeric values are treated as milliseconds/bytes.
 
 **Zod Source Reference:**
 ```typescript
-// src/config/zod-schema.session.ts (simplified)
+// src/config/zod-schema.session.ts (lines ~280-310)
 SessionMaintenanceSchema.superRefine((val, ctx) => {
-  if (val.pruneAfter !== undefined) {
-    try {
-      parseDurationMs(String(val.pruneAfter).trim(), { defaultUnit: "d" });
-    } catch {
+  if (typeof val.pruneAfter === "string") {
+    const ms = parseDurationMs(val.pruneAfter);
+    if (!ms) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "invalid duration (use ms, s, m, h, d)",
+        message: "pruneAfter must be a valid duration",
         path: ["pruneAfter"],
       });
     }
   }
-  // Similar for rotateBytes/maxDiskBytes/highWaterBytes using parseByteSize(..., { defaultUnit: "b" })
+  // Similar for rotateBytes, etc.
 })
 ```
 
@@ -233,7 +240,7 @@ Add descriptions to document the format:
       },
       {
         "type": "number",
-        "description": "Numeric duration interpreted with this field's default unit (days for pruneAfter)."
+        "description": "Duration in milliseconds"
       }
     ],
     "description": "Time after which inactive sessions are pruned. Default: '30d'"
@@ -270,22 +277,13 @@ Add descriptions to document the format:
 The Zod schema requires that each browser profile must have **at least one** of `cdpPort` or `cdpUrl` set:
 
 ```typescript
-// src/config/zod-schema.ts (simplified)
-browser: z.object({
-  profiles: z.record(
-    z.string().regex(/^[a-z0-9-]+$/),
-    z
-      .object({
-        cdpPort: z.number().int().min(1).max(65535).optional(),
-        cdpUrl: z.string().optional(),
-        // ...
-      })
-      .strict()
-      .refine((value) => value.cdpPort || value.cdpUrl, {
-        message: "Profile must set cdpPort or cdpUrl",
-      }),
-  ),
-})
+// src/config/zod-schema.ts (lines ~317-319)
+BrowserProfileSchema.refine(
+  (value) => value.cdpPort || value.cdpUrl,
+  {
+    message: "Profile must set cdpPort or cdpUrl",
+  }
+)
 ```
 
 **Current OpenAPI Representation:**
@@ -338,22 +336,16 @@ Add a description or comment to the `profiles` schema:
 **Description:**
 
 The Zod schema validates module paths using `isSafeRelativeModulePath()` which enforces:
-- Input is trimmed and non-empty
-- Not absolute (`path.isAbsolute(value) === false`)
-- Does not start with `~`
-- Does not include `:`
-- Does not contain a path segment exactly equal to `..`
+- Must be relative (no leading `/`, `~/`, `C:`, etc.)
+- No parent directory traversal (`..`)
+- No absolute path markers
 
 ```typescript
 // src/config/zod-schema.hooks.ts (lines ~6-32)
 function isSafeRelativeModulePath(raw: string): boolean {
-  const value = raw.trim();
-  if (!value) return false;
-  if (path.isAbsolute(value)) return false;
-  if (value.startsWith("~")) return false;
-  if (value.includes(":")) return false;
-  const parts = value.split(/[\\/]+/g);
-  if (parts.some((part) => part === "..")) return false;
+  if (raw.startsWith("/") || raw.startsWith("~/")) return false;
+  if (raw.includes(":")) return false; // Windows drive letters
+  if (raw.includes("..")) return false;
   return true;
 }
 
@@ -371,7 +363,8 @@ Just `{"type": "string"}` with no validation hints.
 {
   "module": {
     "type": "string",
-    "description": "Safe relative module path. Runtime validation trims whitespace, rejects absolute paths, '~' prefixes, ':' characters, and any path segment equal to '..'."
+    "pattern": "^(?!/)(?!.*:)(?!.*\\.\\.).*$",
+    "description": "Safe relative module path (no absolute paths, no '..' traversal, no drive letters)"
   }
 }
 ```
@@ -393,10 +386,7 @@ The Zod schema marks `dm` as deprecated:
 ```typescript
 // src/config/zod-schema.session.ts
 {
-  /**
-   * @deprecated Use `direct` instead. Kept for backward compatibility.
-   */
-  dm: SessionResetConfigSchema.optional(),
+  dm: SessionResetSchema.optional(), // @deprecated use `direct` instead
 }
 ```
 
