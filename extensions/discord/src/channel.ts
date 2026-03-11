@@ -1,10 +1,11 @@
+import { createScopedChannelConfigBase } from "openclaw/plugin-sdk/compat";
 import {
   buildAccountScopedDmSecurityPolicy,
+  collectOpenProviderGroupPolicyWarnings,
   collectOpenGroupPolicyConfiguredRouteWarnings,
+  createScopedAccountConfigAccessors,
   formatAllowFromLowercase,
-  mapAllowFromEntries,
-  resolveOptionalConfigString,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/compat";
 import {
   applyAccountNameToChannelSection,
   buildComputedAccountStatusSnapshot,
@@ -13,7 +14,6 @@ import {
   collectDiscordAuditChannelIds,
   collectDiscordStatusIssues,
   DEFAULT_ACCOUNT_ID,
-  deleteAccountFromConfigSection,
   discordOnboardingAdapter,
   DiscordConfigSchema,
   getChatChannelMeta,
@@ -33,9 +33,6 @@ import {
   resolveDefaultDiscordAccountId,
   resolveDiscordGroupRequireMention,
   resolveDiscordGroupToolPolicy,
-  resolveOpenProviderRuntimeGroupPolicy,
-  resolveDefaultGroupPolicy,
-  setAccountEnabledInConfigSection,
   type ChannelMessageActionAdapter,
   type ChannelPlugin,
   type ResolvedDiscordAccount,
@@ -57,6 +54,22 @@ const discordMessageActions: ChannelMessageActionAdapter = {
     return ma.handleAction(ctx);
   },
 };
+
+const discordConfigAccessors = createScopedAccountConfigAccessors({
+  resolveAccount: ({ cfg, accountId }) => resolveDiscordAccount({ cfg, accountId }),
+  resolveAllowFrom: (account: ResolvedDiscordAccount) => account.config.dm?.allowFrom,
+  formatAllowFrom: (allowFrom) => formatAllowFromLowercase({ allowFrom }),
+  resolveDefaultTo: (account: ResolvedDiscordAccount) => account.config.defaultTo,
+});
+
+const discordConfigBase = createScopedChannelConfigBase({
+  sectionKey: "discord",
+  listAccountIds: listDiscordAccountIds,
+  resolveAccount: (cfg, accountId) => resolveDiscordAccount({ cfg, accountId }),
+  inspectAccount: (cfg, accountId) => inspectDiscordAccount({ cfg, accountId }),
+  defaultAccountId: resolveDefaultDiscordAccountId,
+  clearBaseFields: ["token", "name"],
+});
 
 export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
   id: "discord",
@@ -88,25 +101,7 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
   reload: { configPrefixes: ["channels.discord"] },
   configSchema: buildChannelConfigSchema(DiscordConfigSchema),
   config: {
-    listAccountIds: (cfg) => listDiscordAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveDiscordAccount({ cfg, accountId }),
-    inspectAccount: (cfg, accountId) => inspectDiscordAccount({ cfg, accountId }),
-    defaultAccountId: (cfg) => resolveDefaultDiscordAccountId(cfg),
-    setAccountEnabled: ({ cfg, accountId, enabled }) =>
-      setAccountEnabledInConfigSection({
-        cfg,
-        sectionKey: "discord",
-        accountId,
-        enabled,
-        allowTopLevel: true,
-      }),
-    deleteAccount: ({ cfg, accountId }) =>
-      deleteAccountFromConfigSection({
-        cfg,
-        sectionKey: "discord",
-        accountId,
-        clearBaseFields: ["token", "name"],
-      }),
+    ...discordConfigBase,
     isConfigured: (account) => Boolean(account.token?.trim()),
     describeAccount: (account) => ({
       accountId: account.accountId,
@@ -115,11 +110,7 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
       configured: Boolean(account.token?.trim()),
       tokenSource: account.tokenSource,
     }),
-    resolveAllowFrom: ({ cfg, accountId }) =>
-      mapAllowFromEntries(resolveDiscordAccount({ cfg, accountId }).config.dm?.allowFrom),
-    formatAllowFrom: ({ allowFrom }) => formatAllowFromLowercase({ allowFrom }),
-    resolveDefaultTo: ({ cfg, accountId }) =>
-      resolveOptionalConfigString(resolveDiscordAccount({ cfg, accountId }).config.defaultTo),
+    ...discordConfigAccessors,
   },
   security: {
     resolveDmPolicy: ({ cfg, accountId, account }) => {
@@ -135,38 +126,33 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
       });
     },
     collectWarnings: ({ account, cfg }) => {
-      const warnings: string[] = [];
-      const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
-      const { groupPolicy } = resolveOpenProviderRuntimeGroupPolicy({
-        providerConfigPresent: cfg.channels?.discord !== undefined,
-        groupPolicy: account.config.groupPolicy,
-        defaultGroupPolicy,
-      });
       const guildEntries = account.config.guilds ?? {};
       const guildsConfigured = Object.keys(guildEntries).length > 0;
       const channelAllowlistConfigured = guildsConfigured;
 
-      warnings.push(
-        ...collectOpenGroupPolicyConfiguredRouteWarnings({
-          groupPolicy,
-          routeAllowlistConfigured: channelAllowlistConfigured,
-          configureRouteAllowlist: {
-            surface: "Discord guilds",
-            openScope: "any channel not explicitly denied",
-            groupPolicyPath: "channels.discord.groupPolicy",
-            routeAllowlistPath: "channels.discord.guilds.<id>.channels",
-          },
-          missingRouteAllowlist: {
-            surface: "Discord guilds",
-            openBehavior:
-              "with no guild/channel allowlist; any channel can trigger (mention-gated)",
-            remediation:
-              'Set channels.discord.groupPolicy="allowlist" and configure channels.discord.guilds.<id>.channels',
-          },
-        }),
-      );
-
-      return warnings;
+      return collectOpenProviderGroupPolicyWarnings({
+        cfg,
+        providerConfigPresent: cfg.channels?.discord !== undefined,
+        configuredGroupPolicy: account.config.groupPolicy,
+        collect: (groupPolicy) =>
+          collectOpenGroupPolicyConfiguredRouteWarnings({
+            groupPolicy,
+            routeAllowlistConfigured: channelAllowlistConfigured,
+            configureRouteAllowlist: {
+              surface: "Discord guilds",
+              openScope: "any channel not explicitly denied",
+              groupPolicyPath: "channels.discord.groupPolicy",
+              routeAllowlistPath: "channels.discord.guilds.<id>.channels",
+            },
+            missingRouteAllowlist: {
+              surface: "Discord guilds",
+              openBehavior:
+                "with no guild/channel allowlist; any channel can trigger (mention-gated)",
+              remediation:
+                'Set channels.discord.groupPolicy="allowlist" and configure channels.discord.guilds.<id>.channels',
+            },
+          }),
+      });
     },
   },
   groups: {

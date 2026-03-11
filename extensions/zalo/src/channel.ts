@@ -2,8 +2,10 @@ import {
   buildAccountScopedDmSecurityPolicy,
   buildOpenGroupPolicyRestrictSendersWarning,
   buildOpenGroupPolicyWarning,
+  collectOpenProviderGroupPolicyWarnings,
+  createAccountStatusSink,
   mapAllowFromEntries,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/compat";
 import type {
   ChannelAccountSnapshot,
   ChannelDock,
@@ -27,8 +29,6 @@ import {
   isNumericTargetId,
   PAIRING_APPROVED_MESSAGE,
   resolveOutboundMediaUrls,
-  resolveDefaultGroupPolicy,
-  resolveOpenProviderRuntimeGroupPolicy,
   sendPayloadWithChunkedTextAndMedia,
   setAccountEnabledInConfigSection,
 } from "openclaw/plugin-sdk/zalo";
@@ -150,37 +150,39 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
       });
     },
     collectWarnings: ({ account, cfg }) => {
-      const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
-      const { groupPolicy } = resolveOpenProviderRuntimeGroupPolicy({
+      return collectOpenProviderGroupPolicyWarnings({
+        cfg,
         providerConfigPresent: cfg.channels?.zalo !== undefined,
-        groupPolicy: account.config.groupPolicy,
-        defaultGroupPolicy,
+        configuredGroupPolicy: account.config.groupPolicy,
+        collect: (groupPolicy) => {
+          if (groupPolicy !== "open") {
+            return [];
+          }
+          const explicitGroupAllowFrom = mapAllowFromEntries(account.config.groupAllowFrom);
+          const dmAllowFrom = mapAllowFromEntries(account.config.allowFrom);
+          const effectiveAllowFrom =
+            explicitGroupAllowFrom.length > 0 ? explicitGroupAllowFrom : dmAllowFrom;
+          if (effectiveAllowFrom.length > 0) {
+            return [
+              buildOpenGroupPolicyRestrictSendersWarning({
+                surface: "Zalo groups",
+                openScope: "any member",
+                groupPolicyPath: "channels.zalo.groupPolicy",
+                groupAllowFromPath: "channels.zalo.groupAllowFrom",
+              }),
+            ];
+          }
+          return [
+            buildOpenGroupPolicyWarning({
+              surface: "Zalo groups",
+              openBehavior:
+                "with no groupAllowFrom/allowFrom allowlist; any member can trigger (mention-gated)",
+              remediation:
+                'Set channels.zalo.groupPolicy="allowlist" + channels.zalo.groupAllowFrom',
+            }),
+          ];
+        },
       });
-      if (groupPolicy !== "open") {
-        return [];
-      }
-      const explicitGroupAllowFrom = mapAllowFromEntries(account.config.groupAllowFrom);
-      const dmAllowFrom = mapAllowFromEntries(account.config.allowFrom);
-      const effectiveAllowFrom =
-        explicitGroupAllowFrom.length > 0 ? explicitGroupAllowFrom : dmAllowFrom;
-      if (effectiveAllowFrom.length > 0) {
-        return [
-          buildOpenGroupPolicyRestrictSendersWarning({
-            surface: "Zalo groups",
-            openScope: "any member",
-            groupPolicyPath: "channels.zalo.groupPolicy",
-            groupAllowFromPath: "channels.zalo.groupAllowFrom",
-          }),
-        ];
-      }
-      return [
-        buildOpenGroupPolicyWarning({
-          surface: "Zalo groups",
-          openBehavior:
-            "with no groupAllowFrom/allowFrom allowlist; any member can trigger (mention-gated)",
-          remediation: 'Set channels.zalo.groupPolicy="allowlist" + channels.zalo.groupAllowFrom',
-        }),
-      ];
     },
   },
   groups: {
@@ -333,6 +335,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
     startAccount: async (ctx) => {
       const account = ctx.account;
       const token = account.token.trim();
+      const mode = account.config.webhookUrl ? "webhook" : "polling";
       let zaloBotLabel = "";
       const fetcher = resolveZaloProxyFetch(account.config.proxy);
       try {
@@ -341,14 +344,25 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
         if (name) {
           zaloBotLabel = ` (${name})`;
         }
+        if (!probe.ok) {
+          ctx.log?.warn?.(
+            `[${account.accountId}] Zalo probe failed before provider start (${String(probe.elapsedMs)}ms): ${probe.error}`,
+          );
+        }
         ctx.setStatus({
           accountId: account.accountId,
           bot: probe.bot,
         });
-      } catch {
-        // ignore probe errors
+      } catch (err) {
+        ctx.log?.warn?.(
+          `[${account.accountId}] Zalo probe threw before provider start: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
       }
-      ctx.log?.info(`[${account.accountId}] starting provider${zaloBotLabel}`);
+      const statusSink = createAccountStatusSink({
+        accountId: ctx.accountId,
+        setStatus: ctx.setStatus,
+      });
+      ctx.log?.info(`[${account.accountId}] starting provider${zaloBotLabel} mode=${mode}`);
       const { monitorZaloProvider } = await import("./monitor.js");
       return monitorZaloProvider({
         token,
@@ -361,7 +375,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
         webhookSecret: normalizeSecretInputString(account.config.webhookSecret),
         webhookPath: account.config.webhookPath,
         fetcher,
-        statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
+        statusSink,
       });
     },
   },

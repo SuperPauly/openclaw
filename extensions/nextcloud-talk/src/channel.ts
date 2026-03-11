@@ -1,9 +1,12 @@
 import {
   buildAccountScopedDmSecurityPolicy,
+  collectAllowlistProviderGroupPolicyWarnings,
   collectOpenGroupPolicyRouteAllowlistWarnings,
+  createAccountStatusSink,
   formatAllowFromLowercase,
   mapAllowFromEntries,
-} from "openclaw/plugin-sdk";
+  runPassiveAccountLifecycle,
+} from "openclaw/plugin-sdk/compat";
 import {
   applyAccountNameToChannelSection,
   buildBaseChannelStatusSummary,
@@ -13,14 +16,11 @@ import {
   DEFAULT_ACCOUNT_ID,
   deleteAccountFromConfigSection,
   normalizeAccountId,
-  resolveAllowlistProviderRuntimeGroupPolicy,
-  resolveDefaultGroupPolicy,
   setAccountEnabledInConfigSection,
   type ChannelPlugin,
   type OpenClawConfig,
   type ChannelSetupInput,
 } from "openclaw/plugin-sdk/nextcloud-talk";
-import { waitForAbortSignal } from "../../../src/infra/abort-signal.js";
 import {
   listNextcloudTalkAccountIds,
   resolveDefaultNextcloudTalkAccountId,
@@ -133,31 +133,31 @@ export const nextcloudTalkPlugin: ChannelPlugin<ResolvedNextcloudTalkAccount> = 
       });
     },
     collectWarnings: ({ account, cfg }) => {
-      const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
-      const { groupPolicy } = resolveAllowlistProviderRuntimeGroupPolicy({
-        providerConfigPresent:
-          (cfg.channels as Record<string, unknown> | undefined)?.["nextcloud-talk"] !== undefined,
-        groupPolicy: account.config.groupPolicy,
-        defaultGroupPolicy,
-      });
       const roomAllowlistConfigured =
         account.config.rooms && Object.keys(account.config.rooms).length > 0;
-      return collectOpenGroupPolicyRouteAllowlistWarnings({
-        groupPolicy,
-        routeAllowlistConfigured: roomAllowlistConfigured,
-        restrictSenders: {
-          surface: "Nextcloud Talk rooms",
-          openScope: "any member in allowed rooms",
-          groupPolicyPath: "channels.nextcloud-talk.groupPolicy",
-          groupAllowFromPath: "channels.nextcloud-talk.groupAllowFrom",
-        },
-        noRouteAllowlist: {
-          surface: "Nextcloud Talk rooms",
-          routeAllowlistPath: "channels.nextcloud-talk.rooms",
-          routeScope: "room",
-          groupPolicyPath: "channels.nextcloud-talk.groupPolicy",
-          groupAllowFromPath: "channels.nextcloud-talk.groupAllowFrom",
-        },
+      return collectAllowlistProviderGroupPolicyWarnings({
+        cfg,
+        providerConfigPresent:
+          (cfg.channels as Record<string, unknown> | undefined)?.["nextcloud-talk"] !== undefined,
+        configuredGroupPolicy: account.config.groupPolicy,
+        collect: (groupPolicy) =>
+          collectOpenGroupPolicyRouteAllowlistWarnings({
+            groupPolicy,
+            routeAllowlistConfigured: Boolean(roomAllowlistConfigured),
+            restrictSenders: {
+              surface: "Nextcloud Talk rooms",
+              openScope: "any member in allowed rooms",
+              groupPolicyPath: "channels.nextcloud-talk.groupPolicy",
+              groupAllowFromPath: "channels.nextcloud-talk.groupAllowFrom",
+            },
+            noRouteAllowlist: {
+              surface: "Nextcloud Talk rooms",
+              routeAllowlistPath: "channels.nextcloud-talk.rooms",
+              routeScope: "room",
+              groupPolicyPath: "channels.nextcloud-talk.groupPolicy",
+              groupAllowFromPath: "channels.nextcloud-talk.groupAllowFrom",
+            },
+          }),
       });
     },
   },
@@ -339,17 +339,25 @@ export const nextcloudTalkPlugin: ChannelPlugin<ResolvedNextcloudTalkAccount> = 
 
       ctx.log?.info(`[${account.accountId}] starting Nextcloud Talk webhook server`);
 
-      const { stop } = await monitorNextcloudTalkProvider({
-        accountId: account.accountId,
-        config: ctx.cfg as CoreConfig,
-        runtime: ctx.runtime,
-        abortSignal: ctx.abortSignal,
-        statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
+      const statusSink = createAccountStatusSink({
+        accountId: ctx.accountId,
+        setStatus: ctx.setStatus,
       });
 
-      // Keep webhook channels pending for the account lifecycle.
-      await waitForAbortSignal(ctx.abortSignal);
-      stop();
+      await runPassiveAccountLifecycle({
+        abortSignal: ctx.abortSignal,
+        start: async () =>
+          await monitorNextcloudTalkProvider({
+            accountId: account.accountId,
+            config: ctx.cfg as CoreConfig,
+            runtime: ctx.runtime,
+            abortSignal: ctx.abortSignal,
+            statusSink,
+          }),
+        stop: async (monitor) => {
+          monitor.stop();
+        },
+      });
     },
     logoutAccount: async ({ accountId, cfg }) => {
       const nextCfg = { ...cfg } as OpenClawConfig;

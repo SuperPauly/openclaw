@@ -1,20 +1,18 @@
 import {
-  buildAccountScopedDmSecurityPolicy,
   buildOpenGroupPolicyWarning,
-  mapAllowFromEntries,
-} from "openclaw/plugin-sdk";
+  collectAllowlistProviderGroupPolicyWarnings,
+  createScopedAccountConfigAccessors,
+  createScopedChannelConfigBase,
+  createScopedDmSecurityResolver,
+} from "openclaw/plugin-sdk/compat";
 import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
   buildProbeChannelStatusSummary,
   collectStatusIssuesFromLastError,
   DEFAULT_ACCOUNT_ID,
-  deleteAccountFromConfigSection,
   normalizeAccountId,
   PAIRING_APPROVED_MESSAGE,
-  resolveAllowlistProviderRuntimeGroupPolicy,
-  resolveDefaultGroupPolicy,
-  setAccountEnabledInConfigSection,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk/matrix";
 import { matrixMessageActions } from "./actions.js";
@@ -100,6 +98,37 @@ function buildMatrixConfigUpdate(
   };
 }
 
+const matrixConfigAccessors = createScopedAccountConfigAccessors({
+  resolveAccount: ({ cfg, accountId }) =>
+    resolveMatrixAccountConfig({ cfg: cfg as CoreConfig, accountId }),
+  resolveAllowFrom: (account) => account.dm?.allowFrom,
+  formatAllowFrom: (allowFrom) => normalizeMatrixAllowList(allowFrom),
+});
+
+const matrixConfigBase = createScopedChannelConfigBase<ResolvedMatrixAccount, CoreConfig>({
+  sectionKey: "matrix",
+  listAccountIds: listMatrixAccountIds,
+  resolveAccount: (cfg, accountId) => resolveMatrixAccount({ cfg, accountId }),
+  defaultAccountId: resolveDefaultMatrixAccountId,
+  clearBaseFields: [
+    "name",
+    "homeserver",
+    "userId",
+    "accessToken",
+    "password",
+    "deviceName",
+    "initialSyncLimit",
+  ],
+});
+
+const resolveMatrixDmPolicy = createScopedDmSecurityResolver<ResolvedMatrixAccount>({
+  channelKey: "matrix",
+  resolvePolicy: (account) => account.config.dm?.policy,
+  resolveAllowFrom: (account) => account.config.dm?.allowFrom,
+  allowFromPathSuffix: "dm.",
+  normalizeEntry: (raw) => normalizeMatrixUserId(raw),
+});
+
 export const matrixPlugin: ChannelPlugin<ResolvedMatrixAccount> = {
   id: "matrix",
   meta,
@@ -121,32 +150,7 @@ export const matrixPlugin: ChannelPlugin<ResolvedMatrixAccount> = {
   reload: { configPrefixes: ["channels.matrix"] },
   configSchema: buildChannelConfigSchema(MatrixConfigSchema),
   config: {
-    listAccountIds: (cfg) => listMatrixAccountIds(cfg as CoreConfig),
-    resolveAccount: (cfg, accountId) => resolveMatrixAccount({ cfg: cfg as CoreConfig, accountId }),
-    defaultAccountId: (cfg) => resolveDefaultMatrixAccountId(cfg as CoreConfig),
-    setAccountEnabled: ({ cfg, accountId, enabled }) =>
-      setAccountEnabledInConfigSection({
-        cfg: cfg as CoreConfig,
-        sectionKey: "matrix",
-        accountId,
-        enabled,
-        allowTopLevel: true,
-      }),
-    deleteAccount: ({ cfg, accountId }) =>
-      deleteAccountFromConfigSection({
-        cfg: cfg as CoreConfig,
-        sectionKey: "matrix",
-        accountId,
-        clearBaseFields: [
-          "name",
-          "homeserver",
-          "userId",
-          "accessToken",
-          "password",
-          "deviceName",
-          "initialSyncLimit",
-        ],
-      }),
+    ...matrixConfigBase,
     isConfigured: (account) => account.configured,
     describeAccount: (account) => ({
       accountId: account.accountId,
@@ -155,43 +159,27 @@ export const matrixPlugin: ChannelPlugin<ResolvedMatrixAccount> = {
       configured: account.configured,
       baseUrl: account.homeserver,
     }),
-    resolveAllowFrom: ({ cfg, accountId }) => {
-      const matrixConfig = resolveMatrixAccountConfig({ cfg: cfg as CoreConfig, accountId });
-      return mapAllowFromEntries(matrixConfig.dm?.allowFrom);
-    },
-    formatAllowFrom: ({ allowFrom }) => normalizeMatrixAllowList(allowFrom),
+    ...matrixConfigAccessors,
   },
   security: {
-    resolveDmPolicy: ({ cfg, accountId, account }) => {
-      return buildAccountScopedDmSecurityPolicy({
-        cfg: cfg as CoreConfig,
-        channelKey: "matrix",
-        accountId,
-        fallbackAccountId: account.accountId ?? DEFAULT_ACCOUNT_ID,
-        policy: account.config.dm?.policy,
-        allowFrom: account.config.dm?.allowFrom ?? [],
-        allowFromPathSuffix: "dm.",
-        normalizeEntry: (raw) => normalizeMatrixUserId(raw),
-      });
-    },
+    resolveDmPolicy: resolveMatrixDmPolicy,
     collectWarnings: ({ account, cfg }) => {
-      const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg as CoreConfig);
-      const { groupPolicy } = resolveAllowlistProviderRuntimeGroupPolicy({
+      return collectAllowlistProviderGroupPolicyWarnings({
+        cfg: cfg as CoreConfig,
         providerConfigPresent: (cfg as CoreConfig).channels?.matrix !== undefined,
-        groupPolicy: account.config.groupPolicy,
-        defaultGroupPolicy,
+        configuredGroupPolicy: account.config.groupPolicy,
+        collect: (groupPolicy) =>
+          groupPolicy === "open"
+            ? [
+                buildOpenGroupPolicyWarning({
+                  surface: "Matrix rooms",
+                  openBehavior: "allows any room to trigger (mention-gated)",
+                  remediation:
+                    'Set channels.matrix.groupPolicy="allowlist" + channels.matrix.groups (and optionally channels.matrix.groupAllowFrom) to restrict rooms',
+                }),
+              ]
+            : [],
       });
-      if (groupPolicy !== "open") {
-        return [];
-      }
-      return [
-        buildOpenGroupPolicyWarning({
-          surface: "Matrix rooms",
-          openBehavior: "allows any room to trigger (mention-gated)",
-          remediation:
-            'Set channels.matrix.groupPolicy="allowlist" + channels.matrix.groups (and optionally channels.matrix.groupAllowFrom) to restrict rooms',
-        }),
-      ];
     },
   },
   groups: {

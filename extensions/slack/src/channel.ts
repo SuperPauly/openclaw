@@ -1,16 +1,16 @@
+import { createScopedChannelConfigBase } from "openclaw/plugin-sdk/compat";
 import {
   buildAccountScopedDmSecurityPolicy,
+  collectOpenProviderGroupPolicyWarnings,
   collectOpenGroupPolicyConfiguredRouteWarnings,
+  createScopedAccountConfigAccessors,
   formatAllowFromLowercase,
-  mapAllowFromEntries,
-  resolveOptionalConfigString,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/compat";
 import {
   applyAccountNameToChannelSection,
   buildComputedAccountStatusSnapshot,
   buildChannelConfigSchema,
   DEFAULT_ACCOUNT_ID,
-  deleteAccountFromConfigSection,
   extractSlackToolSend,
   getChatChannelMeta,
   handleSlackMessageAction,
@@ -29,12 +29,9 @@ import {
   resolveDefaultSlackAccountId,
   resolveSlackAccount,
   resolveSlackReplyToMode,
-  resolveOpenProviderRuntimeGroupPolicy,
-  resolveDefaultGroupPolicy,
   resolveSlackGroupRequireMention,
   resolveSlackGroupToolPolicy,
   buildSlackThreadingToolContext,
-  setAccountEnabledInConfigSection,
   slackOnboardingAdapter,
   SlackConfigSchema,
   type ChannelPlugin,
@@ -91,6 +88,22 @@ function resolveSlackSendContext(params: {
   return { send, threadTsValue, tokenOverride };
 }
 
+const slackConfigAccessors = createScopedAccountConfigAccessors({
+  resolveAccount: ({ cfg, accountId }) => resolveSlackAccount({ cfg, accountId }),
+  resolveAllowFrom: (account: ResolvedSlackAccount) => account.dm?.allowFrom,
+  formatAllowFrom: (allowFrom) => formatAllowFromLowercase({ allowFrom }),
+  resolveDefaultTo: (account: ResolvedSlackAccount) => account.config.defaultTo,
+});
+
+const slackConfigBase = createScopedChannelConfigBase({
+  sectionKey: "slack",
+  listAccountIds: listSlackAccountIds,
+  resolveAccount: (cfg, accountId) => resolveSlackAccount({ cfg, accountId }),
+  inspectAccount: (cfg, accountId) => inspectSlackAccount({ cfg, accountId }),
+  defaultAccountId: resolveDefaultSlackAccountId,
+  clearBaseFields: ["botToken", "appToken", "name"],
+});
+
 export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
   id: "slack",
   meta: {
@@ -139,25 +152,7 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
   reload: { configPrefixes: ["channels.slack"] },
   configSchema: buildChannelConfigSchema(SlackConfigSchema),
   config: {
-    listAccountIds: (cfg) => listSlackAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveSlackAccount({ cfg, accountId }),
-    inspectAccount: (cfg, accountId) => inspectSlackAccount({ cfg, accountId }),
-    defaultAccountId: (cfg) => resolveDefaultSlackAccountId(cfg),
-    setAccountEnabled: ({ cfg, accountId, enabled }) =>
-      setAccountEnabledInConfigSection({
-        cfg,
-        sectionKey: "slack",
-        accountId,
-        enabled,
-        allowTopLevel: true,
-      }),
-    deleteAccount: ({ cfg, accountId }) =>
-      deleteAccountFromConfigSection({
-        cfg,
-        sectionKey: "slack",
-        accountId,
-        clearBaseFields: ["botToken", "appToken", "name"],
-      }),
+    ...slackConfigBase,
     isConfigured: (account) => isSlackAccountConfigured(account),
     describeAccount: (account) => ({
       accountId: account.accountId,
@@ -167,11 +162,7 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
       botTokenSource: account.botTokenSource,
       appTokenSource: account.appTokenSource,
     }),
-    resolveAllowFrom: ({ cfg, accountId }) =>
-      mapAllowFromEntries(resolveSlackAccount({ cfg, accountId }).dm?.allowFrom),
-    formatAllowFrom: ({ allowFrom }) => formatAllowFromLowercase({ allowFrom }),
-    resolveDefaultTo: ({ cfg, accountId }) =>
-      resolveOptionalConfigString(resolveSlackAccount({ cfg, accountId }).config.defaultTo),
+    ...slackConfigAccessors,
   },
   security: {
     resolveDmPolicy: ({ cfg, accountId, account }) => {
@@ -187,36 +178,31 @@ export const slackPlugin: ChannelPlugin<ResolvedSlackAccount> = {
       });
     },
     collectWarnings: ({ account, cfg }) => {
-      const warnings: string[] = [];
-      const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
-      const { groupPolicy } = resolveOpenProviderRuntimeGroupPolicy({
-        providerConfigPresent: cfg.channels?.slack !== undefined,
-        groupPolicy: account.config.groupPolicy,
-        defaultGroupPolicy,
-      });
       const channelAllowlistConfigured =
         Boolean(account.config.channels) && Object.keys(account.config.channels ?? {}).length > 0;
 
-      warnings.push(
-        ...collectOpenGroupPolicyConfiguredRouteWarnings({
-          groupPolicy,
-          routeAllowlistConfigured: channelAllowlistConfigured,
-          configureRouteAllowlist: {
-            surface: "Slack channels",
-            openScope: "any channel not explicitly denied",
-            groupPolicyPath: "channels.slack.groupPolicy",
-            routeAllowlistPath: "channels.slack.channels",
-          },
-          missingRouteAllowlist: {
-            surface: "Slack channels",
-            openBehavior: "with no channel allowlist; any channel can trigger (mention-gated)",
-            remediation:
-              'Set channels.slack.groupPolicy="allowlist" and configure channels.slack.channels',
-          },
-        }),
-      );
-
-      return warnings;
+      return collectOpenProviderGroupPolicyWarnings({
+        cfg,
+        providerConfigPresent: cfg.channels?.slack !== undefined,
+        configuredGroupPolicy: account.config.groupPolicy,
+        collect: (groupPolicy) =>
+          collectOpenGroupPolicyConfiguredRouteWarnings({
+            groupPolicy,
+            routeAllowlistConfigured: channelAllowlistConfigured,
+            configureRouteAllowlist: {
+              surface: "Slack channels",
+              openScope: "any channel not explicitly denied",
+              groupPolicyPath: "channels.slack.groupPolicy",
+              routeAllowlistPath: "channels.slack.channels",
+            },
+            missingRouteAllowlist: {
+              surface: "Slack channels",
+              openBehavior: "with no channel allowlist; any channel can trigger (mention-gated)",
+              remediation:
+                'Set channels.slack.groupPolicy="allowlist" and configure channels.slack.channels',
+            },
+          }),
+      });
     },
   },
   groups: {
