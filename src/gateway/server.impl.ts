@@ -45,6 +45,7 @@ import { enqueueSystemEvent } from "../infra/system-events.js";
 import { scheduleGatewayUpdateCheck } from "../infra/update-startup.js";
 import { startDiagnosticHeartbeat, stopDiagnosticHeartbeat } from "../logging/diagnostic.js";
 import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
+import { resolveConfiguredChannelPluginIds } from "../plugins/channel-plugin-ids.js";
 import { getGlobalHookRunner, runGlobalGatewayStopSafely } from "../plugins/hook-runner-global.js";
 import { createEmptyPluginRegistry } from "../plugins/registry.js";
 import { createPluginRuntime } from "../plugins/runtime/index.js";
@@ -63,7 +64,7 @@ import {
   prepareSecretsRuntimeSnapshot,
   resolveCommandSecretsFromActiveRuntimeSnapshot,
 } from "../secrets/runtime.js";
-import { runOnboardingWizard } from "../wizard/onboarding.js";
+import { runSetupWizard } from "../wizard/setup.js";
 import { createAuthRateLimiter, type AuthRateLimiter } from "./auth-rate-limit.js";
 import { startChannelHealthMonitor } from "./channel-health-monitor.js";
 import { startGatewayConfigReloader } from "./config-reload.js";
@@ -107,6 +108,7 @@ import {
   incrementPresenceVersion,
   refreshGatewayHealthSnapshot,
 } from "./server/health-state.js";
+import { resolveHookClientIpConfig } from "./server/hooks.js";
 import { createReadinessChecker } from "./server/readiness.js";
 import { loadGatewayTlsRuntime } from "./server/tls.js";
 import {
@@ -137,6 +139,13 @@ const logDiscovery = log.child("discovery");
 const logTailscale = log.child("tailscale");
 const logChannels = log.child("channels");
 const logBrowser = log.child("browser");
+
+let cachedChannelRuntime: ReturnType<typeof createPluginRuntime>["channel"] | null = null;
+
+function getChannelRuntime() {
+  cachedChannelRuntime ??= createPluginRuntime().channel;
+  return cachedChannelRuntime;
+}
 const logHealth = log.child("health");
 const logCron = log.child("cron");
 const logReload = log.child("reload");
@@ -254,7 +263,7 @@ export type GatewayServerOptions = {
    */
   allowCanvasHostInTests?: boolean;
   /**
-   * Test-only: override the onboarding wizard runner.
+   * Test-only: override the setup wizard runner.
    */
   wizardRunner?: (
     opts: import("../commands/onboard-types.js").OnboardOptions,
@@ -465,17 +474,27 @@ export async function startGatewayServer(
   initSubagentRegistry();
   const defaultAgentId = resolveDefaultAgentId(cfgAtStart);
   const defaultWorkspaceDir = resolveAgentWorkspaceDir(cfgAtStart, defaultAgentId);
+  const configuredChannelPluginIds = minimalTestGateway
+    ? []
+    : resolveConfiguredChannelPluginIds({
+        config: cfgAtStart,
+        workspaceDir: defaultWorkspaceDir,
+        env: process.env,
+      });
   const baseMethods = listGatewayMethods();
   const emptyPluginRegistry = createEmptyPluginRegistry();
-  const { pluginRegistry, gatewayMethods: baseGatewayMethods } = minimalTestGateway
-    ? { pluginRegistry: emptyPluginRegistry, gatewayMethods: baseMethods }
-    : loadGatewayPlugins({
-        cfg: cfgAtStart,
-        workspaceDir: defaultWorkspaceDir,
-        log,
-        coreGatewayHandlers,
-        baseMethods,
-      });
+  let pluginRegistry = emptyPluginRegistry;
+  let baseGatewayMethods = baseMethods;
+  if (!minimalTestGateway) {
+    ({ pluginRegistry, gatewayMethods: baseGatewayMethods } = loadGatewayPlugins({
+      cfg: cfgAtStart,
+      workspaceDir: defaultWorkspaceDir,
+      log,
+      coreGatewayHandlers,
+      baseMethods,
+      preferSetupRuntimeForChannelPlugins: configuredChannelPluginIds.length > 0,
+    }));
+  }
   const channelLogs = Object.fromEntries(
     listChannelPlugins().map((plugin) => [plugin.id, logChannels.child(plugin.id)]),
   ) as Record<ChannelId, ReturnType<typeof createSubsystemLogger>>;
@@ -511,6 +530,7 @@ export async function startGatewayServer(
     tailscaleMode,
   } = runtimeConfig;
   let hooksConfig = runtimeConfig.hooksConfig;
+  let hookClientIpConfig = resolveHookClientIpConfig(cfgAtStart);
   const canvasHostEnabled = runtimeConfig.canvasHostEnabled;
 
   // Create auth rate limiters used by connect/auth flows.
@@ -559,7 +579,7 @@ export async function startGatewayServer(
       : { kind: "missing" };
   }
 
-  const wizardRunner = opts.wizardRunner ?? runOnboardingWizard;
+  const wizardRunner = opts.wizardRunner ?? runSetupWizard;
   const { wizardSessions, findRunningWizard, purgeWizardSession } = createWizardSessionTracker();
 
   const deps = createDefaultDeps();
@@ -573,7 +593,7 @@ export async function startGatewayServer(
     loadConfig,
     channelLogs,
     channelRuntimeEnvs,
-    channelRuntime: createPluginRuntime().channel,
+    resolveChannelRuntime: getChannelRuntime,
   });
   const getReadiness = createReadinessChecker({
     channelManager,
@@ -581,6 +601,7 @@ export async function startGatewayServer(
   });
   const {
     canvasHost,
+    releasePluginRouteRegistry,
     httpServer,
     httpServers,
     httpBindHosts,
@@ -613,6 +634,7 @@ export async function startGatewayServer(
     rateLimiter: authRateLimiter,
     gatewayTls,
     hooksConfig: () => hooksConfig,
+    getHookClientIpConfig: () => hookClientIpConfig,
     pluginRegistry,
     deps,
     canvasRuntime,
@@ -754,11 +776,17 @@ export async function startGatewayServer(
 
   const healthCheckMinutes = cfgAtStart.gateway?.channelHealthCheckMinutes;
   const healthCheckDisabled = healthCheckMinutes === 0;
+  const staleEventThresholdMinutes = cfgAtStart.gateway?.channelStaleEventThresholdMinutes;
+  const maxRestartsPerHour = cfgAtStart.gateway?.channelMaxRestartsPerHour;
   let channelHealthMonitor = healthCheckDisabled
     ? null
     : startChannelHealthMonitor({
         channelManager,
         checkIntervalMs: (healthCheckMinutes ?? 5) * 60_000,
+        ...(staleEventThresholdMinutes != null && {
+          staleEventThresholdMs: staleEventThresholdMinutes * 60_000,
+        }),
+        ...(maxRestartsPerHour != null && { maxRestartsPerHour }),
       });
 
   if (!minimalTestGateway) {
@@ -923,6 +951,16 @@ export async function startGatewayServer(
 
   let browserControl: Awaited<ReturnType<typeof startBrowserControlServerIfEnabled>> = null;
   if (!minimalTestGateway) {
+    if (configuredChannelPluginIds.length > 0) {
+      ({ pluginRegistry } = loadGatewayPlugins({
+        cfg: cfgAtStart,
+        workspaceDir: defaultWorkspaceDir,
+        log,
+        coreGatewayHandlers,
+        baseMethods,
+        logDiagnostics: false,
+      }));
+    }
     ({ browserControl, pluginServices } = await startGatewaySidecars({
       cfg: cfgAtStart,
       pluginRegistry,
@@ -954,6 +992,7 @@ export async function startGatewayServer(
           broadcast,
           getState: () => ({
             hooksConfig,
+            hookClientIpConfig,
             heartbeatRunner,
             cronState,
             browserControl,
@@ -961,6 +1000,7 @@ export async function startGatewayServer(
           }),
           setState: (nextState) => {
             hooksConfig = nextState.hooksConfig;
+            hookClientIpConfig = nextState.hookClientIpConfig;
             heartbeatRunner = nextState.heartbeatRunner;
             cronState = nextState.cronState;
             cron = cronState.cron;
@@ -975,8 +1015,21 @@ export async function startGatewayServer(
           logChannels,
           logCron,
           logReload,
-          createHealthMonitor: (checkIntervalMs: number) =>
-            startChannelHealthMonitor({ channelManager, checkIntervalMs }),
+          createHealthMonitor: (opts: {
+            checkIntervalMs: number;
+            staleEventThresholdMs?: number;
+            maxRestartsPerHour?: number;
+          }) =>
+            startChannelHealthMonitor({
+              channelManager,
+              checkIntervalMs: opts.checkIntervalMs,
+              ...(opts.staleEventThresholdMs != null && {
+                staleEventThresholdMs: opts.staleEventThresholdMs,
+              }),
+              ...(opts.maxRestartsPerHour != null && {
+                maxRestartsPerHour: opts.maxRestartsPerHour,
+              }),
+            }),
         });
 
         return startGatewayConfigReloader({
@@ -1017,6 +1070,7 @@ export async function startGatewayServer(
     tailscaleCleanup,
     canvasHost,
     canvasHostServer,
+    releasePluginRouteRegistry,
     stopChannel,
     pluginServices,
     cron,
