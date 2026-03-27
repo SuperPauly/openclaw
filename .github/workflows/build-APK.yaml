@@ -16,6 +16,15 @@ on:
     workflows: ["Sync from OpenClaw upstream"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: true
+        default: "debug"
+        type: choice
+        options:
+          - debug
+          - release
 
 concurrency:
   group: android-apk-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -23,7 +32,7 @@ concurrency:
 
 jobs:
   build-apk:
-    name: Build debug APK
+    name: Build ${{ github.event.inputs.build_type || 'debug' }} APK
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
@@ -41,28 +50,34 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          accept-android-sdk-licenses: false
+          accept-android-sdk-licenses: true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.11.1
+          gradle-version: wrapper
 
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses >/dev/null
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0"
-      - name: Build debug APK
+
+      - name: Build APK
         working-directory: apps/android
-        run: ./gradlew --no-daemon :app:assembleDebug
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
+          if [ "$BUILD_TYPE" = "release" ]; then
+            ./gradlew --no-daemon --stacktrace :app:assembleRelease
+          else
+            ./gradlew --no-daemon --stacktrace :app:assembleDebug
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openclaw-debug-apk
-          path: apps/android/app/build/outputs/apk/debug/*.apk
+          name: openclaw-${{ github.event.inputs.build_type || 'debug' }}-apk
+          path: apps/android/app/build/outputs/apk/${{ github.event.inputs.build_type || 'debug' }}/*.apk
           retention-days: 30
           if-no-files-found: error
