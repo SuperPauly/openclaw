@@ -25,6 +25,14 @@ on:
         options:
           - debug
           - release
+      flavor:
+        description: "Product flavor"
+        required: true
+        default: "play"
+        type: choice
+        options:
+          - play
+          - thirdParty
 
 concurrency:
   group: android-apk-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -32,7 +40,7 @@ concurrency:
 
 jobs:
   build-apk:
-    name: Build ${{ github.event.inputs.build_type || 'debug' }} APK
+    name: Build ${{ github.event.inputs.flavor || 'play' }} ${{ github.event.inputs.build_type || 'debug' }} APK
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
@@ -68,16 +76,24 @@ jobs:
         working-directory: apps/android
         run: |
           BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
-          if [ "$BUILD_TYPE" = "release" ]; then
-            ./gradlew --no-daemon --stacktrace :app:assembleRelease
-          else
-            ./gradlew --no-daemon --stacktrace :app:assembleDebug
-          fi
+          FLAVOR="${{ github.event.inputs.flavor || 'play' }}"
+
+          # Capitalize first letter for Gradle task names (play -> Play, thirdParty -> ThirdParty)
+          FLAVOR_CAP="${FLAVOR^}"
+          BUILD_CAP="${BUILD_TYPE^}"
+
+          ./gradlew --no-daemon --stacktrace ":app:assemble${FLAVOR_CAP}${BUILD_CAP}"
+
+      - name: Verify APK output
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
+          FLAVOR="${{ github.event.inputs.flavor || 'play' }}"
+          find "apps/android/app/build/outputs/apk/${FLAVOR}/${BUILD_TYPE}" -type f -name "*.apk" -print
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openclaw-${{ github.event.inputs.build_type || 'debug' }}-apk
-          path: apps/android/app/build/outputs/apk/${{ github.event.inputs.build_type || 'debug' }}/*.apk
+          name: openclaw-${{ github.event.inputs.flavor || 'play' }}-${{ github.event.inputs.build_type || 'debug' }}-apk
+          path: apps/android/app/build/outputs/apk/${{ github.event.inputs.flavor || 'play' }}/${{ github.event.inputs.build_type || 'debug' }}/*.apk
           retention-days: 30
           if-no-files-found: error
