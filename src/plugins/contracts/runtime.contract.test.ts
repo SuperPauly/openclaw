@@ -1,31 +1,39 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  registerProviderPlugin,
+  requireRegisteredProvider,
+} from "../../../test/helpers/extensions/provider-registration.js";
 import { createProviderUsageFetch, makeResponse } from "../../test-utils/provider-usage-fetch.js";
-import type { ProviderRuntimeModel } from "../types.js";
+import type { ProviderPlugin, ProviderRuntimeModel } from "../types.js";
 
-const getOAuthApiKeyMock = vi.hoisted(() => vi.fn());
-const refreshQwenPortalCredentialsMock = vi.hoisted(() => vi.fn());
+const CONTRACT_SETUP_TIMEOUT_MS = 300_000;
+
+const refreshOpenAICodexTokenMock = vi.hoisted(() => vi.fn());
+const getOAuthProvidersMock = vi.hoisted(() =>
+  vi.fn(() => [
+    { id: "anthropic", envApiKey: "ANTHROPIC_API_KEY", oauthTokenEnv: "ANTHROPIC_OAUTH_TOKEN" }, // pragma: allowlist secret
+    { id: "google", envApiKey: "GOOGLE_API_KEY", oauthTokenEnv: "GOOGLE_OAUTH_TOKEN" }, // pragma: allowlist secret
+    { id: "openai-codex", envApiKey: "OPENAI_API_KEY", oauthTokenEnv: "OPENAI_OAUTH_TOKEN" }, // pragma: allowlist secret
+  ]),
+);
 
 vi.mock("@mariozechner/pi-ai/oauth", async () => {
-  const actual = await vi.importActual<object>("@mariozechner/pi-ai/oauth");
+  const actual = await vi.importActual<typeof import("@mariozechner/pi-ai/oauth")>(
+    "@mariozechner/pi-ai/oauth",
+  );
   return {
     ...actual,
-    getOAuthApiKey: getOAuthApiKeyMock,
+    refreshOpenAICodexToken: refreshOpenAICodexTokenMock,
+    getOAuthProviders: getOAuthProvidersMock,
   };
 });
 
-vi.mock("../../providers/qwen-portal-oauth.js", () => ({
-  refreshQwenPortalCredentials: refreshQwenPortalCredentialsMock,
+vi.mock("../../../extensions/openai/openai-codex-provider.runtime.js", () => ({
+  refreshOpenAICodexToken: refreshOpenAICodexTokenMock,
 }));
-
-const { providerContractRegistry } = await import("./registry.js");
-
-function requireProvider(providerId: string) {
-  const entry = providerContractRegistry.find((candidate) => candidate.provider.id === providerId);
-  if (!entry) {
-    throw new Error(`provider contract entry missing for ${providerId}`);
-  }
-  return entry.provider;
-}
 
 function createModel(overrides: Partial<ProviderRuntimeModel> & Pick<ProviderRuntimeModel, "id">) {
   return {
@@ -42,36 +50,137 @@ function createModel(overrides: Partial<ProviderRuntimeModel> & Pick<ProviderRun
   } satisfies ProviderRuntimeModel;
 }
 
-describe("provider runtime contract", () => {
-  describe("anthropic", () => {
-    it("owns anthropic 4.6 forward-compat resolution", () => {
-      const provider = requireProvider("anthropic");
-      const model = provider.resolveDynamicModel?.({
-        provider: "anthropic",
-        modelId: "claude-sonnet-4.6-20260219",
-        modelRegistry: {
-          find: (_provider: string, id: string) =>
-            id === "claude-sonnet-4.5-20260219"
-              ? createModel({
-                  id: id,
-                  api: "anthropic-messages",
-                  provider: "anthropic",
-                  baseUrl: "https://api.anthropic.com",
-                })
-              : null,
-        } as never,
-      });
+type ProviderRuntimeContractFixture = {
+  providerIds: string[];
+  pluginId: string;
+  name: string;
+  load: () => Promise<{ default: Parameters<typeof registerProviderPlugin>[0]["plugin"] }>;
+};
 
-      expect(model).toMatchObject({
-        id: "claude-sonnet-4.6-20260219",
-        provider: "anthropic",
-        api: "anthropic-messages",
-        baseUrl: "https://api.anthropic.com",
-      });
-    });
+const PROVIDER_RUNTIME_CONTRACT_FIXTURES: readonly ProviderRuntimeContractFixture[] = [
+  {
+    providerIds: ["anthropic"],
+    pluginId: "anthropic",
+    name: "Anthropic",
+    load: async () => await import("../../../extensions/anthropic/index.ts"),
+  },
+  {
+    providerIds: ["github-copilot"],
+    pluginId: "github-copilot",
+    name: "GitHub Copilot",
+    load: async () => await import("../../../extensions/github-copilot/index.ts"),
+  },
+  {
+    providerIds: ["google", "google-gemini-cli"],
+    pluginId: "google",
+    name: "Google",
+    load: async () => await import("../../../extensions/google/index.ts"),
+  },
+  {
+    providerIds: ["openai", "openai-codex"],
+    pluginId: "openai",
+    name: "OpenAI",
+    load: async () => await import("../../../extensions/openai/index.ts"),
+  },
+  {
+    providerIds: ["openrouter"],
+    pluginId: "openrouter",
+    name: "OpenRouter",
+    load: async () => await import("../../../extensions/openrouter/index.ts"),
+  },
+  {
+    providerIds: ["venice"],
+    pluginId: "venice",
+    name: "Venice",
+    load: async () => await import("../../../extensions/venice/index.ts"),
+  },
+  {
+    providerIds: ["xai"],
+    pluginId: "xai",
+    name: "xAI",
+    load: async () => await import("../../../extensions/xai/index.ts"),
+  },
+  {
+    providerIds: ["zai"],
+    pluginId: "zai",
+    name: "Z.AI",
+    load: async () => await import("../../../extensions/zai/index.ts"),
+  },
+] as const;
+
+const providerRuntimeContractProviders = new Map<string, ProviderPlugin>();
+
+function requireProviderContractProvider(providerId: string): ProviderPlugin {
+  const provider = providerRuntimeContractProviders.get(providerId);
+  if (!provider) {
+    throw new Error(`provider runtime contract fixture missing for ${providerId}`);
+  }
+  return provider;
+}
+
+describe("provider runtime contract", { timeout: CONTRACT_SETUP_TIMEOUT_MS }, () => {
+  beforeAll(async () => {
+    providerRuntimeContractProviders.clear();
+    const registeredFixtures = await Promise.all(
+      PROVIDER_RUNTIME_CONTRACT_FIXTURES.map(async (fixture) => {
+        const plugin = await fixture.load();
+        return {
+          fixture,
+          providers: registerProviderPlugin({
+            plugin: plugin.default,
+            id: fixture.pluginId,
+            name: fixture.name,
+          }).providers,
+        };
+      }),
+    );
+    for (const { fixture, providers } of registeredFixtures) {
+      for (const providerId of fixture.providerIds) {
+        providerRuntimeContractProviders.set(
+          providerId,
+          requireRegisteredProvider(providers, providerId, "provider"),
+        );
+      }
+    }
+  }, CONTRACT_SETUP_TIMEOUT_MS);
+  beforeEach(() => {
+    refreshOpenAICodexTokenMock.mockReset();
+    getOAuthProvidersMock.mockClear();
+  }, CONTRACT_SETUP_TIMEOUT_MS);
+
+  describe("anthropic", () => {
+    it(
+      "owns anthropic 4.6 forward-compat resolution",
+      () => {
+        const provider = requireProviderContractProvider("anthropic");
+        const model = provider.resolveDynamicModel?.({
+          provider: "anthropic",
+          modelId: "claude-sonnet-4.6-20260219",
+          modelRegistry: {
+            find: (_provider: string, id: string) =>
+              id === "claude-sonnet-4.5-20260219"
+                ? createModel({
+                    id: id,
+                    api: "anthropic-messages",
+                    provider: "anthropic",
+                    baseUrl: "https://api.anthropic.com",
+                  })
+                : null,
+          } as never,
+        });
+
+        expect(model).toMatchObject({
+          id: "claude-sonnet-4.6-20260219",
+          provider: "anthropic",
+          api: "anthropic-messages",
+          baseUrl: "https://api.anthropic.com",
+        });
+      },
+      CONTRACT_SETUP_TIMEOUT_MS,
+    );
 
     it("owns usage auth resolution", async () => {
-      const provider = requireProvider("anthropic");
+      const provider = requireProviderContractProvider("anthropic");
       await expect(
         provider.resolveUsageAuth?.({
           config: {} as never,
@@ -88,7 +197,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns auth doctor hint generation", () => {
-      const provider = requireProvider("anthropic");
+      const provider = requireProviderContractProvider("anthropic");
       const hint = provider.buildAuthDoctorHint?.({
         provider: "anthropic",
         profileId: "anthropic:default",
@@ -121,7 +230,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns usage snapshot fetching", async () => {
-      const provider = requireProvider("anthropic");
+      const provider = requireProviderContractProvider("anthropic");
       const mockFetch = createProviderUsageFetch(async (url) => {
         if (url.includes("api.anthropic.com/api/oauth/usage")) {
           return makeResponse(200, {
@@ -154,10 +263,10 @@ describe("provider runtime contract", () => {
 
   describe("github-copilot", () => {
     it("owns Copilot-specific forward-compat fallbacks", () => {
-      const provider = requireProvider("github-copilot");
+      const provider = requireProviderContractProvider("github-copilot");
       const model = provider.resolveDynamicModel?.({
         provider: "github-copilot",
-        modelId: "gpt-5.3-codex",
+        modelId: "gpt-5.4",
         modelRegistry: {
           find: (_provider: string, id: string) =>
             id === "gpt-5.2-codex"
@@ -172,7 +281,7 @@ describe("provider runtime contract", () => {
       });
 
       expect(model).toMatchObject({
-        id: "gpt-5.3-codex",
+        id: "gpt-5.4",
         provider: "github-copilot",
         api: "openai-codex-responses",
       });
@@ -181,7 +290,7 @@ describe("provider runtime contract", () => {
 
   describe("google", () => {
     it("owns google direct gemini 3.1 forward-compat resolution", () => {
-      const provider = requireProvider("google");
+      const provider = requireProviderContractProvider("google");
       const model = provider.resolveDynamicModel?.({
         provider: "google",
         modelId: "gemini-3.1-pro-preview",
@@ -213,7 +322,7 @@ describe("provider runtime contract", () => {
 
   describe("google-gemini-cli", () => {
     it("owns gemini cli 3.1 forward-compat resolution", () => {
-      const provider = requireProvider("google-gemini-cli");
+      const provider = requireProviderContractProvider("google-gemini-cli");
       const model = provider.resolveDynamicModel?.({
         provider: "google-gemini-cli",
         modelId: "gemini-3.1-pro-preview",
@@ -241,7 +350,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns usage-token parsing", async () => {
-      const provider = requireProvider("google-gemini-cli");
+      const provider = requireProviderContractProvider("google-gemini-cli");
       await expect(
         provider.resolveUsageAuth?.({
           config: {} as never,
@@ -260,7 +369,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns OAuth auth-profile formatting", () => {
-      const provider = requireProvider("google-gemini-cli");
+      const provider = requireProviderContractProvider("google-gemini-cli");
 
       expect(
         provider.formatApiKey?.({
@@ -275,7 +384,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns usage snapshot fetching", async () => {
-      const provider = requireProvider("google-gemini-cli");
+      const provider = requireProviderContractProvider("google-gemini-cli");
       const mockFetch = createProviderUsageFetch(async (url) => {
         if (url.includes("cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")) {
           return makeResponse(200, {
@@ -309,7 +418,7 @@ describe("provider runtime contract", () => {
 
   describe("openai", () => {
     it("owns openai gpt-5.4 forward-compat resolution", () => {
-      const provider = requireProvider("openai");
+      const provider = requireProviderContractProvider("openai");
       const model = provider.resolveDynamicModel?.({
         provider: "openai",
         modelId: "gpt-5.4-pro",
@@ -336,8 +445,40 @@ describe("provider runtime contract", () => {
       });
     });
 
+    it("owns openai gpt-5.4 mini forward-compat resolution", () => {
+      const provider = requireProviderContractProvider("openai");
+      const model = provider.resolveDynamicModel?.({
+        provider: "openai",
+        modelId: "gpt-5.4-mini",
+        modelRegistry: {
+          find: (_provider: string, id: string) =>
+            id === "gpt-5-mini"
+              ? createModel({
+                  id,
+                  provider: "openai",
+                  api: "openai-responses",
+                  baseUrl: "https://api.openai.com/v1",
+                  input: ["text", "image"],
+                  reasoning: true,
+                  contextWindow: 400_000,
+                  maxTokens: 128_000,
+                })
+              : null,
+        } as never,
+      });
+
+      expect(model).toMatchObject({
+        id: "gpt-5.4-mini",
+        provider: "openai",
+        api: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        contextWindow: 400_000,
+        maxTokens: 128_000,
+      });
+    });
+
     it("owns direct openai transport normalization", () => {
-      const provider = requireProvider("openai");
+      const provider = requireProviderContractProvider("openai");
       expect(
         provider.normalizeResolvedModel?.({
           provider: "openai",
@@ -358,25 +499,144 @@ describe("provider runtime contract", () => {
     });
   });
 
-  describe("openai-codex", () => {
-    it("owns refresh fallback for accountId extraction failures", async () => {
-      const provider = requireProvider("openai-codex");
-      const credential = {
-        type: "oauth" as const,
-        provider: "openai-codex",
-        access: "cached-access-token",
-        refresh: "refresh-token",
-        expires: Date.now() - 60_000,
-      };
+  describe("xai", () => {
+    it("owns Grok forward-compat resolution for newer fast models", () => {
+      const provider = requireProviderContractProvider("xai");
+      const model = provider.resolveDynamicModel?.({
+        provider: "xai",
+        modelId: "grok-4-1-fast-reasoning",
+        modelRegistry: {
+          find: () => null,
+        } as never,
+        providerConfig: {
+          api: "openai-completions",
+          baseUrl: "https://api.x.ai/v1",
+        },
+      });
 
-      getOAuthApiKeyMock.mockReset();
-      getOAuthApiKeyMock.mockRejectedValueOnce(new Error("Failed to extract accountId from token"));
-
-      await expect(provider.refreshOAuth?.(credential)).resolves.toEqual(credential);
+      expect(model).toMatchObject({
+        id: "grok-4-1-fast-reasoning",
+        provider: "xai",
+        api: "openai-completions",
+        baseUrl: "https://api.x.ai/v1",
+        reasoning: true,
+        contextWindow: 2_000_000,
+      });
     });
 
+    it("owns xai modern-model matching without accepting multi-agent ids", () => {
+      const provider = requireProviderContractProvider("xai");
+
+      expect(
+        provider.isModernModelRef?.({
+          provider: "xai",
+          modelId: "grok-4-1-fast-reasoning",
+        } as never),
+      ).toBe(true);
+      expect(
+        provider.isModernModelRef?.({
+          provider: "xai",
+          modelId: "grok-4.20-multi-agent-experimental-beta-0304",
+        } as never),
+      ).toBe(false);
+    });
+
+    it("owns direct xai compat flags on resolved models", () => {
+      const provider = requireProviderContractProvider("xai");
+
+      expect(
+        provider.normalizeResolvedModel?.({
+          provider: "xai",
+          modelId: "grok-4-1-fast",
+          model: createModel({
+            id: "grok-4-1-fast",
+            provider: "xai",
+            api: "openai-completions",
+            baseUrl: "https://api.x.ai/v1",
+          }),
+        } as never),
+      ).toMatchObject({
+        compat: {
+          toolSchemaProfile: "xai",
+          nativeWebSearchTool: true,
+          toolCallArgumentsEncoding: "html-entities",
+        },
+      });
+    });
+  });
+
+  describe("openrouter", () => {
+    it("owns xai downstream compat flags for x-ai routed models", () => {
+      const provider = requireProviderContractProvider("openrouter");
+      expect(
+        provider.normalizeResolvedModel?.({
+          provider: "openrouter",
+          modelId: "x-ai/grok-4-1-fast",
+          model: createModel({
+            id: "x-ai/grok-4-1-fast",
+            provider: "openrouter",
+            api: "openai-completions",
+            baseUrl: "https://openrouter.ai/api/v1",
+          }),
+        }),
+      ).toMatchObject({
+        compat: {
+          toolSchemaProfile: "xai",
+          nativeWebSearchTool: true,
+          toolCallArgumentsEncoding: "html-entities",
+        },
+      });
+    });
+  });
+
+  describe("venice", () => {
+    it("owns xai downstream compat flags for grok-backed Venice models", () => {
+      const provider = requireProviderContractProvider("venice");
+      expect(
+        provider.normalizeResolvedModel?.({
+          provider: "venice",
+          modelId: "grok-41-fast",
+          model: createModel({
+            id: "grok-41-fast",
+            provider: "venice",
+            api: "openai-completions",
+            baseUrl: "https://api.venice.ai/api/v1",
+          }),
+        }),
+      ).toMatchObject({
+        compat: {
+          toolSchemaProfile: "xai",
+          nativeWebSearchTool: true,
+          toolCallArgumentsEncoding: "html-entities",
+        },
+      });
+    });
+  });
+
+  describe("openai-codex", () => {
+    it(
+      "owns refresh fallback for accountId extraction failures",
+      { timeout: CONTRACT_SETUP_TIMEOUT_MS },
+      async () => {
+        const provider = requireProviderContractProvider("openai-codex");
+        const credential = {
+          type: "oauth" as const,
+          provider: "openai-codex",
+          access: "cached-access-token",
+          refresh: "refresh-token",
+          expires: Date.now() - 60_000,
+        };
+
+        refreshOpenAICodexTokenMock.mockRejectedValueOnce(
+          new Error("Failed to extract accountId from token"),
+        );
+
+        await expect(provider.refreshOAuth?.(credential)).resolves.toEqual(credential);
+      },
+    );
+
     it("owns forward-compat codex models", () => {
-      const provider = requireProvider("openai-codex");
+      const provider = requireProviderContractProvider("openai-codex");
       const model = provider.resolveDynamicModel?.({
         provider: "openai-codex",
         modelId: "gpt-5.4",
@@ -403,7 +663,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns codex transport defaults", () => {
-      const provider = requireProvider("openai-codex");
+      const provider = requireProviderContractProvider("openai-codex");
       expect(
         provider.prepareExtraParams?.({
           provider: "openai-codex",
@@ -417,7 +677,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns usage snapshot fetching", async () => {
-      const provider = requireProvider("openai-codex");
+      const provider = requireProviderContractProvider("openai-codex");
       const mockFetch = createProviderUsageFetch(async (url) => {
         if (url.includes("chatgpt.com/backend-api/wham/usage")) {
           return makeResponse(200, {
@@ -453,32 +713,9 @@ describe("provider runtime contract", () => {
     });
   });
 
-  describe("qwen-portal", () => {
-    it("owns OAuth refresh", async () => {
-      const provider = requireProvider("qwen-portal");
-      const credential = {
-        type: "oauth" as const,
-        provider: "qwen-portal",
-        access: "stale-access-token",
-        refresh: "refresh-token",
-        expires: Date.now() - 60_000,
-      };
-      const refreshed = {
-        ...credential,
-        access: "fresh-access-token",
-        expires: Date.now() + 60_000,
-      };
-
-      refreshQwenPortalCredentialsMock.mockReset();
-      refreshQwenPortalCredentialsMock.mockResolvedValueOnce(refreshed);
-
-      await expect(provider.refreshOAuth?.(credential)).resolves.toEqual(refreshed);
-    });
-  });
-
   describe("zai", () => {
     it("owns glm-5 forward-compat resolution", () => {
-      const provider = requireProvider("zai");
+      const provider = requireProviderContractProvider("zai");
       const model = provider.resolveDynamicModel?.({
         provider: "zai",
         modelId: "glm-5",
@@ -507,7 +744,7 @@ describe("provider runtime contract", () => {
     });
 
     it("owns usage auth resolution", async () => {
-      const provider = requireProvider("zai");
+      const provider = requireProviderContractProvider("zai");
       await expect(
         provider.resolveUsageAuth?.({
           config: {} as never,
@@ -523,8 +760,35 @@ describe("provider runtime contract", () => {
       });
     });
 
+    it("falls back to legacy pi auth tokens for usage auth", async () => {
+      const provider = requireProviderContractProvider("zai");
+      const home = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-zai-contract-"));
+      await fs.mkdir(path.join(home, ".pi", "agent"), { recursive: true });
+      await fs.writeFile(
+        path.join(home, ".pi", "agent", "auth.json"),
+        `${JSON.stringify({ "z-ai": { access: "legacy-zai-token" } }, null, 2)}\n`,
+        "utf8",
+      );
+
+      try {
+        await expect(
+          provider.resolveUsageAuth?.({
+            config: {} as never,
+            env: { HOME: home } as NodeJS.ProcessEnv,
+            provider: "zai",
+            resolveApiKeyFromConfigAndStore: () => undefined,
+            resolveOAuthToken: async () => null,
+          }),
+        ).resolves.toEqual({
+          token: "legacy-zai-token",
+        });
+      } finally {
+        await fs.rm(home, { recursive: true, force: true });
+      }
+    });
+
     it("owns usage snapshot fetching", async () => {
-      const provider = requireProvider("zai");
+      const provider = requireProviderContractProvider("zai");
       const mockFetch = createProviderUsageFetch(async (url) => {
         if (url.includes("api.z.ai/api/monitor/usage/quota/limit")) {
           return makeResponse(200, {

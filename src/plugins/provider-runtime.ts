@@ -8,14 +8,19 @@ import {
 import {
   resolveNonBundledProviderPluginIds,
   resolveOwningPluginIdsForProvider,
-  resolvePluginProviders,
 } from "./providers.js";
+import { resolvePluginProviders } from "./providers.runtime.js";
+import { resolvePluginCacheInputs } from "./roots.js";
 import type {
   ProviderAuthDoctorHintContext,
   ProviderAugmentModelCatalogContext,
   ProviderBuildMissingAuthMessageContext,
+  ProviderBuildUnknownModelHintContext,
   ProviderBuiltInModelSuppressionContext,
   ProviderCacheTtlEligibilityContext,
+  ProviderCreateEmbeddingProviderContext,
+  ProviderResolveSyntheticAuthContext,
+  ProviderCreateStreamFnContext,
   ProviderDefaultThinkingPolicyContext,
   ProviderFetchUsageSnapshotContext,
   ProviderModernModelPolicyContext,
@@ -76,11 +81,19 @@ function resolveHookProviderCacheBucket(params: {
   return bucket;
 }
 
-function buildHookProviderCacheKey(params: { workspaceDir?: string; onlyPluginIds?: string[] }) {
-  return `${params.workspaceDir ?? ""}::${JSON.stringify(params.onlyPluginIds ?? [])}`;
+function buildHookProviderCacheKey(params: {
+  workspaceDir?: string;
+  onlyPluginIds?: string[];
+  env?: NodeJS.ProcessEnv;
+}) {
+  const { roots } = resolvePluginCacheInputs({
+    workspaceDir: params.workspaceDir,
+    env: params.env,
+  });
+  return `${roots.workspace ?? ""}::${roots.global}::${roots.stock ?? ""}::${JSON.stringify(params.onlyPluginIds ?? [])}`;
 }
 
-export function resetProviderRuntimeHookCacheForTest(): void {
+export function clearProviderRuntimeHookCache(): void {
   cachedHookProvidersWithoutConfig = new WeakMap<
     NodeJS.ProcessEnv,
     Map<string, ProviderPlugin[]>
@@ -89,6 +102,10 @@ export function resetProviderRuntimeHookCacheForTest(): void {
     OpenClawConfig,
     WeakMap<NodeJS.ProcessEnv, Map<string, ProviderPlugin[]>>
   >();
+}
+
+export function resetProviderRuntimeHookCacheForTest(): void {
+  clearProviderRuntimeHookCache();
 }
 
 function resolveProviderPluginsForHooks(params: {
@@ -105,6 +122,7 @@ function resolveProviderPluginsForHooks(params: {
   const cacheKey = buildHookProviderCacheKey({
     workspaceDir: params.workspaceDir,
     onlyPluginIds: params.onlyPluginIds,
+    env,
   });
   const cached = cacheBucket.get(cacheKey);
   if (cached) {
@@ -220,6 +238,16 @@ export function prepareProviderExtraParams(params: {
   return resolveProviderRuntimePlugin(params)?.prepareExtraParams?.(params.context) ?? undefined;
 }
 
+export function resolveProviderStreamFn(params: {
+  provider: string;
+  config?: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  context: ProviderCreateStreamFnContext;
+}) {
+  return resolveProviderRuntimePlugin(params)?.createStreamFn?.(params.context) ?? undefined;
+}
+
 export function wrapProviderStreamFn(params: {
   provider: string;
   config?: OpenClawConfig;
@@ -228,6 +256,16 @@ export function wrapProviderStreamFn(params: {
   context: ProviderWrapStreamFnContext;
 }) {
   return resolveProviderRuntimePlugin(params)?.wrapStreamFn?.(params.context) ?? undefined;
+}
+
+export async function createProviderEmbeddingProvider(params: {
+  provider: string;
+  config?: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  context: ProviderCreateEmbeddingProviderContext;
+}) {
+  return await resolveProviderRuntimePlugin(params)?.createEmbeddingProvider?.(params.context);
 }
 
 export async function prepareProviderRuntimeAuth(params: {
@@ -350,6 +388,26 @@ export function buildProviderMissingAuthMessageWithPlugin(params: {
   return (
     resolveProviderRuntimePlugin(params)?.buildMissingAuthMessage?.(params.context) ?? undefined
   );
+}
+
+export function buildProviderUnknownModelHintWithPlugin(params: {
+  provider: string;
+  config?: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  context: ProviderBuildUnknownModelHintContext;
+}) {
+  return resolveProviderRuntimePlugin(params)?.buildUnknownModelHint?.(params.context) ?? undefined;
+}
+
+export function resolveProviderSyntheticAuthWithPlugin(params: {
+  provider: string;
+  config?: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  context: ProviderResolveSyntheticAuthContext;
+}) {
+  return resolveProviderRuntimePlugin(params)?.resolveSyntheticAuth?.(params.context) ?? undefined;
 }
 
 export function resolveProviderBuiltInModelSuppression(params: {
