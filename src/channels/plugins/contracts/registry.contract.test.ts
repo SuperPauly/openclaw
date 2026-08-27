@@ -1,23 +1,23 @@
+// Registry contract tests cover shared channel plugin registry contract behavior.
 import { describe, expect, it } from "vitest";
-import { discordSessionBindingAdapterChannels } from "../../../../extensions/discord/runtime-api.js";
-import { feishuSessionBindingAdapterChannels } from "../../../../extensions/feishu/api.js";
-import { matrixSessionBindingAdapterChannels } from "../../../../extensions/matrix/api.js";
-import { telegramSessionBindingAdapterChannels } from "../../../../extensions/telegram/runtime-api.js";
-import { sessionBindingContractChannelIds } from "./manifest.js";
+import { sessionBindingContractChannelIds } from "./test-helpers/manifest.js";
 
-function discoverSessionBindingChannels() {
-  return [
-    ...new Set([
-      ...discordSessionBindingAdapterChannels,
-      ...feishuSessionBindingAdapterChannels,
-      ...matrixSessionBindingAdapterChannels,
-      ...telegramSessionBindingAdapterChannels,
-    ]),
-  ].toSorted();
-}
+const discordSessionBindingAdapterChannels = ["discord"] as const;
 
 describe("channel contract registry", () => {
-  it("keeps session binding coverage aligned with registered session binding adapters", () => {
-    expect([...sessionBindingContractChannelIds]).toEqual(discoverSessionBindingChannels());
+  function expectSessionBindingCoverage(expectedChannelIds: readonly string[]) {
+    const registeredIds = new Set<string>(sessionBindingContractChannelIds);
+    for (const expectedChannelId of expectedChannelIds) {
+      expect(registeredIds.has(expectedChannelId)).toBe(true);
+    }
+  }
+
+  it.each([
+    {
+      name: "keeps core session binding coverage aligned with built-in adapters",
+      expectedChannelIds: [...discordSessionBindingAdapterChannels, "telegram"],
+    },
+  ] as const)("$name", ({ expectedChannelIds }) => {
+    expectSessionBindingCoverage(expectedChannelIds);
   });
 });

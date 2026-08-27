@@ -1,11 +1,27 @@
+// Usage aggregate tests cover token, cost, and latency accumulation.
 import { describe, expect, it } from "vitest";
 import {
   buildUsageAggregateTail,
   mergeUsageDailyLatency,
   mergeUsageLatency,
+  usageDailyModelIdentity,
+  usageModelIdentity,
 } from "./usage-aggregates.js";
 
 describe("shared/usage-aggregates", () => {
+  it("builds collision-free model identities with legacy unknown grouping", () => {
+    expect(usageModelIdentity("fixture", "bedrock::arn")).not.toBe(
+      usageModelIdentity("fixture::bedrock", "arn"),
+    );
+    expect(usageDailyModelIdentity("2026-02-01", "fixture", "bedrock:arn")).not.toBe(
+      usageDailyModelIdentity("2026-02-01", "fixture:bedrock", "arn"),
+    );
+    expect(usageModelIdentity("fixture\0bedrock", "arn")).not.toBe(
+      usageModelIdentity("fixture", "bedrock\0arn"),
+    );
+    expect(usageModelIdentity()).toBe(usageModelIdentity("unknown", "unknown"));
+  });
+
   it("merges latency totals and ignores empty inputs", () => {
     const totals = {
       count: 1,
@@ -120,7 +136,7 @@ describe("shared/usage-aggregates", () => {
     });
 
     expect(tail.latency).toBeUndefined();
-    expect(tail.dailyLatency).toEqual([]);
+    expect(tail.dailyLatency).toStrictEqual([]);
   });
 
   it("normalizes zero-count daily latency entries to zero averages and mins", () => {

@@ -1,139 +1,220 @@
-import { listBundledImageGenerationProviderEntries } from "../../bundled-image-generation-providers.js";
-import {
-  BUNDLED_IMAGE_GENERATION_PLUGIN_IDS,
-  BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS,
-  BUNDLED_PROVIDER_PLUGIN_IDS,
-  BUNDLED_WEB_SEARCH_PLUGIN_IDS,
-} from "../bundled-capability-metadata.js";
+// Plugin contract registry assembles bundled plugin fixtures for shared contract tests.
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { loadBundledCapabilityRuntimeRegistry } from "../bundled-capability-runtime.js";
-import { resolvePluginProviders } from "../providers.runtime.js";
-import type {
-  ImageGenerationProviderPlugin,
-  MediaUnderstandingProviderPlugin,
-  ProviderPlugin,
-  SpeechProviderPlugin,
-  WebSearchProviderPlugin,
-} from "../types.js";
+import { discoverOpenClawPlugins } from "../discovery.js";
+import { loadPluginManifestRegistryCore } from "../manifest-registry.js";
+import { resolveBundledExplicitProviderContractsFromPublicArtifacts } from "../provider-contract-public-artifacts.js";
+import type { ProviderPlugin, WebFetchProviderPlugin, WebSearchProviderPlugin } from "../types.js";
+import { resolveBundledExplicitWebSearchProvidersFromPublicArtifacts } from "../web-provider-public-artifacts.explicit.js";
+import {
+  BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS,
+  type BundledPluginContractSnapshot,
+} from "./inventory/bundled-capability-metadata.js";
+import { normalizeContractStringValues } from "./shared.js";
 
+type BundledCapabilityRuntimeRegistry = ReturnType<typeof loadBundledCapabilityRuntimeRegistry>;
 type CapabilityContractEntry<T> = {
   pluginId: string;
   provider: T;
 };
 
 type ProviderContractEntry = CapabilityContractEntry<ProviderPlugin>;
-
 type WebSearchProviderContractEntry = CapabilityContractEntry<WebSearchProviderPlugin> & {
   credentialValue: unknown;
 };
-
-type SpeechProviderContractEntry = CapabilityContractEntry<SpeechProviderPlugin>;
-type MediaUnderstandingProviderContractEntry =
-  CapabilityContractEntry<MediaUnderstandingProviderPlugin>;
-type ImageGenerationProviderContractEntry = CapabilityContractEntry<ImageGenerationProviderPlugin>;
-
-type PluginRegistrationContractEntry = {
-  pluginId: string;
-  cliBackendIds: string[];
-  providerIds: string[];
-  speechProviderIds: string[];
-  mediaUnderstandingProviderIds: string[];
-  imageGenerationProviderIds: string[];
-  webSearchProviderIds: string[];
-  toolNames: string[];
+type WebFetchProviderContractEntry = CapabilityContractEntry<WebFetchProviderPlugin> & {
+  credentialValue: unknown;
 };
 
-function createProviderContractPluginIdsByProviderId(): Map<string, string[]> {
-  const result = new Map<string, string[]>();
-  for (const entry of BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS) {
-    for (const providerId of entry.providerIds) {
-      const existing = result.get(providerId) ?? [];
-      if (!existing.includes(entry.pluginId)) {
-        existing.push(entry.pluginId);
-      }
-      result.set(providerId, existing);
-    }
+type PluginRegistrationContractEntry = BundledPluginContractSnapshot;
+
+function normalizeProviderEnvVars(
+  providerEnvVars: Record<string, string[]> | undefined,
+): Record<string, string[]> {
+  return Object.fromEntries(
+    Object.entries(providerEnvVars ?? {}).map(([providerId, envVars]) => [
+      providerId,
+      normalizeContractStringValues(envVars),
+    ]),
+  );
+}
+
+function resolvePluginProviderEnvVars(plugin: {
+  setup?: { providers?: Array<{ id: string; envVars?: string[] }> };
+}): Record<string, string[]> {
+  const envVars: Record<string, string[]> = {};
+  for (const provider of plugin.setup?.providers ?? []) {
+    envVars[provider.id] = normalizeContractStringValues(provider.envVars ?? []);
   }
-  return result;
+  return normalizeProviderEnvVars(envVars);
 }
 
-function createContractSpeechProvider(providerId: string): SpeechProviderPlugin {
-  return {
-    id: providerId,
-    label: providerId,
-    isConfigured: () => true,
-    synthesize: async () => ({
-      audioBuffer: Buffer.alloc(0),
-      outputFormat: "mp3",
-      fileExtension: "mp3",
-      voiceCompatible: true,
-    }),
-    listVoices: async () => [],
-  };
-}
-
-function createContractMediaUnderstandingProvider(
-  providerId: string,
-): MediaUnderstandingProviderPlugin {
-  return {
-    id: providerId,
-    capabilities: ["image"],
-    describeImages: async () => {
-      throw new Error(`media-understanding contract stub invoked for ${providerId}`);
-    },
-  };
-}
-
-function uniqueStrings(values: readonly string[]): string[] {
-  const result: string[] = [];
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) {
-      continue;
-    }
-    seen.add(value);
-    result.push(value);
+function resolveBundledManifestContracts(): PluginRegistrationContractEntry[] {
+  if (process.env.VITEST) {
+    return BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS.map((entry) => ({
+      pluginId: entry.pluginId,
+      cliBackendIds: [...entry.cliBackendIds],
+      providerIds: [...entry.providerIds],
+      providerEnvVars: normalizeProviderEnvVars(entry.providerEnvVars),
+      workerProviderIds: [...entry.workerProviderIds],
+      embeddingProviderIds: [...entry.embeddingProviderIds],
+      speechProviderIds: [...entry.speechProviderIds],
+      realtimeTranscriptionProviderIds: [...entry.realtimeTranscriptionProviderIds],
+      realtimeVoiceProviderIds: [...entry.realtimeVoiceProviderIds],
+      mediaUnderstandingProviderIds: [...entry.mediaUnderstandingProviderIds],
+      transcriptSourceProviderIds: [...entry.transcriptSourceProviderIds],
+      documentExtractorIds: [...entry.documentExtractorIds],
+      imageGenerationProviderIds: [...entry.imageGenerationProviderIds],
+      videoGenerationProviderIds: [...entry.videoGenerationProviderIds],
+      musicGenerationProviderIds: [...entry.musicGenerationProviderIds],
+      webContentExtractorIds: [...entry.webContentExtractorIds],
+      webFetchProviderIds: [...entry.webFetchProviderIds],
+      webSearchProviderIds: [...entry.webSearchProviderIds],
+      migrationProviderIds: [...entry.migrationProviderIds],
+      toolNames: [...entry.toolNames],
+    }));
   }
-  return result;
+  return loadPluginManifestRegistryCore({})
+    .plugins.filter(
+      (plugin) =>
+        plugin.origin === "bundled" &&
+        (plugin.cliBackends.length > 0 ||
+          plugin.providers.length > 0 ||
+          (plugin.contracts?.workerProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.embeddingProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.speechProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.realtimeTranscriptionProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.realtimeVoiceProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.mediaUnderstandingProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.transcriptSourceProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.documentExtractors?.length ?? 0) > 0 ||
+          (plugin.contracts?.imageGenerationProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.videoGenerationProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.musicGenerationProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.webContentExtractors?.length ?? 0) > 0 ||
+          (plugin.contracts?.webFetchProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.webSearchProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.migrationProviders?.length ?? 0) > 0 ||
+          (plugin.contracts?.tools?.length ?? 0) > 0),
+    )
+    .map((plugin) => ({
+      pluginId: plugin.id,
+      cliBackendIds: normalizeContractStringValues(plugin.cliBackends),
+      providerIds: normalizeContractStringValues(plugin.providers),
+      providerEnvVars: resolvePluginProviderEnvVars(plugin),
+      workerProviderIds: normalizeContractStringValues(plugin.contracts?.workerProviders ?? []),
+      embeddingProviderIds: normalizeContractStringValues(
+        plugin.contracts?.embeddingProviders ?? [],
+      ),
+      speechProviderIds: normalizeContractStringValues(plugin.contracts?.speechProviders ?? []),
+      realtimeTranscriptionProviderIds: normalizeContractStringValues(
+        plugin.contracts?.realtimeTranscriptionProviders ?? [],
+      ),
+      realtimeVoiceProviderIds: normalizeContractStringValues(
+        plugin.contracts?.realtimeVoiceProviders ?? [],
+      ),
+      mediaUnderstandingProviderIds: normalizeContractStringValues(
+        plugin.contracts?.mediaUnderstandingProviders ?? [],
+      ),
+      transcriptSourceProviderIds: normalizeContractStringValues(
+        plugin.contracts?.transcriptSourceProviders ?? [],
+      ),
+      documentExtractorIds: normalizeContractStringValues(
+        plugin.contracts?.documentExtractors ?? [],
+      ),
+      imageGenerationProviderIds: normalizeContractStringValues(
+        plugin.contracts?.imageGenerationProviders ?? [],
+      ),
+      videoGenerationProviderIds: normalizeContractStringValues(
+        plugin.contracts?.videoGenerationProviders ?? [],
+      ),
+      musicGenerationProviderIds: normalizeContractStringValues(
+        plugin.contracts?.musicGenerationProviders ?? [],
+      ),
+      webContentExtractorIds: normalizeContractStringValues(
+        plugin.contracts?.webContentExtractors ?? [],
+      ),
+      webFetchProviderIds: normalizeContractStringValues(plugin.contracts?.webFetchProviders ?? []),
+      webSearchProviderIds: normalizeContractStringValues(
+        plugin.contracts?.webSearchProviders ?? [],
+      ),
+      migrationProviderIds: normalizeContractStringValues(
+        plugin.contracts?.migrationProviders ?? [],
+      ),
+      toolNames: normalizeContractStringValues(plugin.contracts?.tools ?? []),
+    }));
 }
-
-let providerContractRegistryCache: ProviderContractEntry[] | null = null;
-let webSearchProviderContractRegistryCache: WebSearchProviderContractEntry[] | null = null;
-let speechProviderContractRegistryCache: SpeechProviderContractEntry[] | null = null;
-let mediaUnderstandingProviderContractRegistryCache:
-  | MediaUnderstandingProviderContractEntry[]
-  | null = null;
-let imageGenerationProviderContractRegistryCache: ImageGenerationProviderContractEntry[] | null =
-  null;
-const providerContractPluginIdsByProviderId = createProviderContractPluginIdsByProviderId();
-const providerContractEntriesByPluginId = new Map<string, ProviderContractEntry[]>();
 
 export let providerContractLoadError: Error | undefined;
 
-function loadProviderContractEntriesForPluginId(pluginId: string): ProviderContractEntry[] {
-  const cached = providerContractEntriesByPluginId.get(pluginId);
-  if (cached) {
-    return cached;
+function formatBundledCapabilityPluginLoadError(params: {
+  pluginId: string;
+  capabilityLabel: string;
+  registry: BundledCapabilityRuntimeRegistry;
+}): Error {
+  const plugin = params.registry.plugins.find((entry) => entry.id === params.pluginId);
+  const diagnostics = params.registry.diagnostics
+    .filter((entry) => entry.pluginId === params.pluginId)
+    .map((entry) => entry.message);
+  const providerIds = params.registry.providers
+    .filter((entry) => entry.pluginId === params.pluginId)
+    .map((entry) => entry.provider.id);
+  const webFetchProviderIds = params.registry.webFetchProviders
+    .filter((entry) => entry.pluginId === params.pluginId)
+    .map((entry) => entry.provider.id);
+  const webSearchProviderIds = params.registry.webSearchProviders
+    .filter((entry) => entry.pluginId === params.pluginId)
+    .map((entry) => entry.provider.id);
+  const detailParts = plugin
+    ? [
+        `status=${plugin.status}`,
+        ...(plugin.error ? [`error=${plugin.error}`] : []),
+        `providerIds=[${providerIds.join(", ")}]`,
+        `webFetchProviderIds=[${webFetchProviderIds.join(", ")}]`,
+        `webSearchProviderIds=[${webSearchProviderIds.join(", ")}]`,
+      ]
+    : ["plugin record missing"];
+  if (diagnostics.length > 0) {
+    detailParts.push(`diagnostics=${diagnostics.join(" | ")}`);
   }
-  try {
-    providerContractLoadError = undefined;
-    const entries = resolvePluginProviders({
-      bundledProviderAllowlistCompat: true,
-      bundledProviderVitestCompat: true,
-      onlyPluginIds: [pluginId],
+  return new Error(
+    `bundled ${params.capabilityLabel} contract load failed for ${params.pluginId}: ${detailParts.join("; ")}`,
+  );
+}
+
+function loadScopedCapabilityRuntimeRegistryEntries<T>(params: {
+  pluginId: string;
+  capabilityLabel: string;
+  loadEntries: (registry: BundledCapabilityRuntimeRegistry) => T[];
+}): T[] {
+  const discovery = discoverOpenClawPlugins({});
+  let lastFailure: Error | undefined;
+
+  // Manifest IDs exist before registration; only observed runtime entries prove the load worked.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const registry = loadBundledCapabilityRuntimeRegistry({
+      pluginIds: [params.pluginId],
       pluginSdkResolution: "dist",
-      cache: false,
-      activate: false,
-    }).map((provider) => ({
-      pluginId: provider.pluginId ?? pluginId,
-      provider,
-    }));
-    providerContractEntriesByPluginId.set(pluginId, entries);
-    return entries;
-  } catch (error) {
-    providerContractLoadError = error instanceof Error ? error : new Error(String(error));
-    providerContractEntriesByPluginId.set(pluginId, []);
-    return [];
+      discovery,
+    });
+    const entries = params.loadEntries(registry);
+    if (entries.length > 0) {
+      return entries;
+    }
+
+    lastFailure = formatBundledCapabilityPluginLoadError({
+      pluginId: params.pluginId,
+      capabilityLabel: params.capabilityLabel,
+      registry,
+    });
   }
+
+  throw (
+    lastFailure ??
+    new Error(
+      `bundled ${params.capabilityLabel} contract load failed for ${params.pluginId}: no entries`,
+    )
+  );
 }
 
 function loadProviderContractEntriesForPluginIds(
@@ -142,31 +223,35 @@ function loadProviderContractEntriesForPluginIds(
   return pluginIds.flatMap((pluginId) => loadProviderContractEntriesForPluginId(pluginId));
 }
 
-function loadProviderContractRegistry(): ProviderContractEntry[] {
-  if (!providerContractRegistryCache) {
-    providerContractRegistryCache = loadProviderContractEntriesForPluginIds(
-      BUNDLED_PROVIDER_PLUGIN_IDS,
-    );
+function loadProviderContractEntriesForPluginId(pluginId: string): ProviderContractEntry[] {
+  const publicArtifactEntries = resolveBundledExplicitProviderContractsFromPublicArtifacts({
+    onlyPluginIds: [pluginId],
+  });
+  if (publicArtifactEntries) {
+    return publicArtifactEntries;
   }
-  return providerContractRegistryCache;
-}
 
-function loadUniqueProviderContractProviders(): ProviderPlugin[] {
-  return [
-    ...new Map(
-      loadProviderContractRegistry().map((entry) => [entry.provider.id, entry.provider]),
-    ).values(),
-  ];
-}
-
-function loadProviderContractPluginIds(): string[] {
-  return [...BUNDLED_PROVIDER_PLUGIN_IDS];
-}
-
-function loadProviderContractCompatPluginIds(): string[] {
-  return loadProviderContractPluginIds().map((pluginId) =>
-    pluginId === "kimi-coding" ? "kimi" : pluginId,
-  );
+  try {
+    providerContractLoadError = undefined;
+    const entries = loadScopedCapabilityRuntimeRegistryEntries({
+      pluginId,
+      capabilityLabel: "provider",
+      loadEntries: (registry) =>
+        registry.providers
+          .filter((entry) => entry.pluginId === pluginId)
+          .map((entry) => ({
+            pluginId: entry.pluginId,
+            provider: entry.provider,
+          })),
+    }).map((entry) => ({
+      pluginId: entry.pluginId,
+      provider: entry.provider,
+    }));
+    return entries;
+  } catch (error) {
+    providerContractLoadError = error instanceof Error ? error : new Error(String(error));
+    return [];
+  }
 }
 
 function resolveWebSearchCredentialValue(provider: WebSearchProviderPlugin): unknown {
@@ -180,58 +265,67 @@ function resolveWebSearchCredentialValue(provider: WebSearchProviderPlugin): unk
   if (envVar === "OPENROUTER_API_KEY") {
     return "openrouter-test";
   }
-  return envVar.toLowerCase().includes("api_key") ? `${provider.id}-test` : "sk-test";
+  return normalizeLowercaseStringOrEmpty(envVar).includes("api_key")
+    ? `${provider.id}-test`
+    : "sk-test";
 }
 
-function loadWebSearchProviderContractRegistry(): WebSearchProviderContractEntry[] {
-  if (!webSearchProviderContractRegistryCache) {
-    const registry = loadBundledCapabilityRuntimeRegistry({
-      pluginIds: BUNDLED_WEB_SEARCH_PLUGIN_IDS,
-      pluginSdkResolution: "dist",
-    });
-    webSearchProviderContractRegistryCache = registry.webSearchProviders.map((entry) => ({
-      pluginId: entry.pluginId,
-      provider: entry.provider,
-      credentialValue: resolveWebSearchCredentialValue(entry.provider),
-    }));
+function resolveWebFetchCredentialValue(provider: WebFetchProviderPlugin): unknown {
+  if (provider.requiresCredential === false) {
+    return `${provider.id}-no-key-needed`;
   }
-  return webSearchProviderContractRegistryCache;
-}
-
-function loadSpeechProviderContractRegistry(): SpeechProviderContractEntry[] {
-  if (!speechProviderContractRegistryCache) {
-    // Contract tests only need bundled ownership and public speech surface shape.
-    speechProviderContractRegistryCache = BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS.flatMap((entry) =>
-      entry.speechProviderIds.map((providerId) => ({
-        pluginId: entry.pluginId,
-        provider: createContractSpeechProvider(providerId),
-      })),
-    );
+  const envVar = provider.envVars.find((entry) => entry.trim().length > 0);
+  if (!envVar) {
+    return `${provider.id}-test`;
   }
-  return speechProviderContractRegistryCache;
+  return normalizeLowercaseStringOrEmpty(envVar).includes("api_key")
+    ? `${provider.id}-test`
+    : "sk-test";
 }
 
-function loadMediaUnderstandingProviderContractRegistry(): MediaUnderstandingProviderContractEntry[] {
-  if (!mediaUnderstandingProviderContractRegistryCache) {
-    mediaUnderstandingProviderContractRegistryCache = BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS.flatMap(
-      (entry) =>
-        entry.mediaUnderstandingProviderIds.map((providerId) => ({
+export function resolveWebFetchProviderContractEntriesForPluginId(
+  pluginId: string,
+): WebFetchProviderContractEntry[] {
+  return loadScopedCapabilityRuntimeRegistryEntries({
+    pluginId,
+    capabilityLabel: "web fetch provider",
+    loadEntries: (registry) =>
+      registry.webFetchProviders
+        .filter((entry) => entry.pluginId === pluginId)
+        .map((entry) => ({
           pluginId: entry.pluginId,
-          provider: createContractMediaUnderstandingProvider(providerId),
+          provider: entry.provider,
+          credentialValue: resolveWebFetchCredentialValue(entry.provider),
         })),
-    );
-  }
-  return mediaUnderstandingProviderContractRegistryCache;
+  });
 }
 
-function loadImageGenerationProviderContractRegistry(): ImageGenerationProviderContractEntry[] {
-  if (!imageGenerationProviderContractRegistryCache) {
-    imageGenerationProviderContractRegistryCache =
-      listBundledImageGenerationProviderEntries().filter((entry) =>
-        BUNDLED_IMAGE_GENERATION_PLUGIN_IDS.includes(entry.pluginId),
-      );
+export function resolveWebSearchProviderContractEntriesForPluginId(
+  pluginId: string,
+): WebSearchProviderContractEntry[] {
+  const publicArtifactEntries = resolveBundledExplicitWebSearchProvidersFromPublicArtifacts({
+    onlyPluginIds: [pluginId],
+  })?.map((provider) => ({
+    pluginId: provider.pluginId,
+    provider,
+    credentialValue: resolveWebSearchCredentialValue(provider),
+  }));
+  if (publicArtifactEntries) {
+    return publicArtifactEntries;
   }
-  return imageGenerationProviderContractRegistryCache;
+
+  return loadScopedCapabilityRuntimeRegistryEntries({
+    pluginId,
+    capabilityLabel: "web search provider",
+    loadEntries: (registry) =>
+      registry.webSearchProviders
+        .filter((entry) => entry.pluginId === pluginId)
+        .map((entry) => ({
+          pluginId: entry.pluginId,
+          provider: entry.provider,
+          credentialValue: resolveWebSearchCredentialValue(entry.provider),
+        })),
+  });
 }
 
 function createLazyArrayView<T>(load: () => T[]): T[] {
@@ -265,45 +359,6 @@ function createLazyArrayView<T>(load: () => T[]): T[] {
     },
   });
 }
-
-export const providerContractRegistry: ProviderContractEntry[] = createLazyArrayView(
-  loadProviderContractRegistry,
-);
-
-export const uniqueProviderContractProviders: ProviderPlugin[] = createLazyArrayView(
-  loadUniqueProviderContractProviders,
-);
-
-export const providerContractPluginIds: string[] = createLazyArrayView(
-  loadProviderContractPluginIds,
-);
-
-export const providerContractCompatPluginIds: string[] = createLazyArrayView(
-  loadProviderContractCompatPluginIds,
-);
-
-export function requireProviderContractProvider(providerId: string): ProviderPlugin {
-  const provider = loadProviderContractEntriesForPluginIds(
-    providerContractPluginIdsByProviderId.get(providerId) ?? [],
-  ).find((entry) => entry.provider.id === providerId)?.provider;
-  if (!provider) {
-    if (providerContractLoadError) {
-      throw new Error(
-        `provider contract entry missing for ${providerId}; bundled provider registry failed to load: ${providerContractLoadError.message}`,
-      );
-    }
-    throw new Error(`provider contract entry missing for ${providerId}`);
-  }
-  return provider;
-}
-
-export function resolveProviderContractPluginIdsForProvider(
-  providerId: string,
-): string[] | undefined {
-  const pluginIds = providerContractPluginIdsByProviderId.get(providerId) ?? [];
-  return pluginIds.length > 0 ? pluginIds : undefined;
-}
-
 export function resolveProviderContractProvidersForPluginIds(
   pluginIds: readonly string[],
 ): ProviderPlugin[] {
@@ -316,31 +371,8 @@ export function resolveProviderContractProvidersForPluginIds(
     ).values(),
   ];
 }
-
-export const webSearchProviderContractRegistry: WebSearchProviderContractEntry[] =
-  createLazyArrayView(loadWebSearchProviderContractRegistry);
-
-export const speechProviderContractRegistry: SpeechProviderContractEntry[] = createLazyArrayView(
-  loadSpeechProviderContractRegistry,
-);
-
-export const mediaUnderstandingProviderContractRegistry: MediaUnderstandingProviderContractEntry[] =
-  createLazyArrayView(loadMediaUnderstandingProviderContractRegistry);
-
-export const imageGenerationProviderContractRegistry: ImageGenerationProviderContractEntry[] =
-  createLazyArrayView(loadImageGenerationProviderContractRegistry);
-
 function loadPluginRegistrationContractRegistry(): PluginRegistrationContractEntry[] {
-  return BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS.map((entry) => ({
-    pluginId: entry.pluginId,
-    cliBackendIds: uniqueStrings(entry.cliBackendIds),
-    providerIds: uniqueStrings(entry.providerIds),
-    speechProviderIds: uniqueStrings(entry.speechProviderIds),
-    mediaUnderstandingProviderIds: uniqueStrings(entry.mediaUnderstandingProviderIds),
-    imageGenerationProviderIds: uniqueStrings(entry.imageGenerationProviderIds),
-    webSearchProviderIds: uniqueStrings(entry.webSearchProviderIds),
-    toolNames: uniqueStrings(entry.toolNames),
-  }));
+  return resolveBundledManifestContracts();
 }
 
 export const pluginRegistrationContractRegistry: PluginRegistrationContractEntry[] =

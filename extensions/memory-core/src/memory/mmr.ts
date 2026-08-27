@@ -1,3 +1,6 @@
+// Memory Core plugin module implements mmr behavior.
+import { jaccardSimilarity, textSimilarity, tokenize } from "./tokenize.js";
+
 /**
  * Maximal Marginal Relevance (MMR) re-ranking algorithm.
  *
@@ -7,7 +10,7 @@
  * @see Carbonell & Goldstein, "The Use of MMR, Diversity-Based Reranking" (1998)
  */
 
-export type MMRItem = {
+type MMRItem = {
   id: string;
   score: number;
   content: string;
@@ -26,78 +29,10 @@ export const DEFAULT_MMR_CONFIG: MMRConfig = {
 };
 
 /**
- * Tokenize text for Jaccard similarity computation.
- * Extracts alphanumeric tokens and normalizes to lowercase.
- */
-export function tokenize(text: string): Set<string> {
-  const tokens = text.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
-  return new Set(tokens);
-}
-
-/**
- * Compute Jaccard similarity between two token sets.
- * Returns a value in [0, 1] where 1 means identical sets.
- */
-export function jaccardSimilarity(setA: Set<string>, setB: Set<string>): number {
-  if (setA.size === 0 && setB.size === 0) {
-    return 1;
-  }
-  if (setA.size === 0 || setB.size === 0) {
-    return 0;
-  }
-
-  let intersectionSize = 0;
-  const smaller = setA.size <= setB.size ? setA : setB;
-  const larger = setA.size <= setB.size ? setB : setA;
-
-  for (const token of smaller) {
-    if (larger.has(token)) {
-      intersectionSize++;
-    }
-  }
-
-  const unionSize = setA.size + setB.size - intersectionSize;
-  return unionSize === 0 ? 0 : intersectionSize / unionSize;
-}
-
-/**
- * Compute text similarity between two content strings using Jaccard on tokens.
- */
-export function textSimilarity(contentA: string, contentB: string): number {
-  return jaccardSimilarity(tokenize(contentA), tokenize(contentB));
-}
-
-/**
- * Compute the maximum similarity between an item and all selected items.
- */
-function maxSimilarityToSelected(
-  item: MMRItem,
-  selectedItems: MMRItem[],
-  tokenCache: Map<string, Set<string>>,
-): number {
-  if (selectedItems.length === 0) {
-    return 0;
-  }
-
-  let maxSim = 0;
-  const itemTokens = tokenCache.get(item.id) ?? tokenize(item.content);
-
-  for (const selected of selectedItems) {
-    const selectedTokens = tokenCache.get(selected.id) ?? tokenize(selected.content);
-    const sim = jaccardSimilarity(itemTokens, selectedTokens);
-    if (sim > maxSim) {
-      maxSim = sim;
-    }
-  }
-
-  return maxSim;
-}
-
-/**
  * Compute MMR score for a candidate item.
  * MMR = λ * relevance - (1-λ) * max_similarity_to_selected
  */
-export function computeMMRScore(relevance: number, maxSimilarity: number, lambda: number): number {
+function computeMMRScore(relevance: number, maxSimilarity: number, lambda: number): number {
   return lambda * relevance - (1 - lambda) * maxSimilarity;
 }
 
@@ -113,7 +48,7 @@ export function computeMMRScore(relevance: number, maxSimilarity: number, lambda
  * @param config - MMR configuration (lambda, enabled)
  * @returns Re-ranked items in MMR order
  */
-export function mmrRerank<T extends MMRItem>(items: T[], config: Partial<MMRConfig> = {}): T[] {
+function mmrRerank<T extends MMRItem>(items: T[], config: Partial<MMRConfig> = {}): T[] {
   const { enabled = DEFAULT_MMR_CONFIG.enabled, lambda = DEFAULT_MMR_CONFIG.lambda } = config;
 
   // Early exits
@@ -149,6 +84,11 @@ export function mmrRerank<T extends MMRItem>(items: T[], config: Partial<MMRConf
 
   const selected: T[] = [];
   const remaining = new Set(items);
+  // Once an item has been selected, its similarity contribution to each
+  // remaining candidate never changes. Keep the running maximum so each pair
+  // is compared exactly once instead of rescanning all previously selected
+  // items on every selection round.
+  const maxSimilarityByItem = new Map<T, number>();
 
   // Select items iteratively
   while (remaining.size > 0) {
@@ -157,7 +97,7 @@ export function mmrRerank<T extends MMRItem>(items: T[], config: Partial<MMRConf
 
     for (const candidate of remaining) {
       const normalizedRelevance = normalizeScore(candidate.score);
-      const maxSim = maxSimilarityToSelected(candidate, selected, tokenCache);
+      const maxSim = maxSimilarityByItem.get(candidate) ?? 0;
       const mmrScore = computeMMRScore(normalizedRelevance, maxSim, clampedLambda);
 
       // Use original score as tiebreaker (higher is better)
@@ -173,6 +113,18 @@ export function mmrRerank<T extends MMRItem>(items: T[], config: Partial<MMRConf
     if (bestItem) {
       selected.push(bestItem);
       remaining.delete(bestItem);
+      const selectedTokens = tokenCache.get(bestItem.id) ?? tokenize(bestItem.content);
+      for (const candidate of remaining) {
+        const candidateTokens = tokenCache.get(candidate.id) ?? tokenize(candidate.content);
+        const similarity =
+          candidateTokens.size === 0 && selectedTokens.size === 0
+            ? textSimilarity(candidate.content, bestItem.content)
+            : jaccardSimilarity(candidateTokens, selectedTokens);
+        const previousMax = maxSimilarityByItem.get(candidate) ?? 0;
+        if (similarity > previousMax) {
+          maxSimilarityByItem.set(candidate, similarity);
+        }
+      }
     } else {
       // Should never happen, but safety exit
       break;

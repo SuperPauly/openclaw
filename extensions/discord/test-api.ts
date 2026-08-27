@@ -1,2 +1,5 @@
-export { buildFinalizedDiscordDirectInboundContext } from "./src/monitor/inbound-context.test-helpers.js";
-export { discordOutbound } from "./src/outbound-adapter.js";
+// Discord test API exposes transcript-provider fixtures without deep extension imports.
+export {
+  discordVoiceTranscriptsSourceProvider,
+  setDiscordTranscriptsVoiceManager,
+} from "./src/voice/transcripts-source.js";

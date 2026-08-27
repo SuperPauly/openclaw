@@ -13,12 +13,24 @@ const hookMocks = vi.hoisted(() => ({
   emitAgentEvent: vi.fn(),
 }));
 
-describe("compaction hook wiring", () => {
-  let handleAutoCompactionStart: typeof import("../agents/pi-embedded-subscribe.handlers.compaction.js").handleAutoCompactionStart;
-  let handleAutoCompactionEnd: typeof import("../agents/pi-embedded-subscribe.handlers.compaction.js").handleAutoCompactionEnd;
+vi.mock("../plugins/hook-runner-global.js", () => ({
+  getGlobalHookRunner: () => hookMocks.runner,
+}));
 
-  beforeEach(async () => {
-    vi.resetModules();
+vi.mock("../infra/agent-events.js", () => ({
+  emitAgentEvent: hookMocks.emitAgentEvent,
+  getAgentEventLifecycleGeneration: () => "test-generation",
+  isAgentEventLifecycleGenerationCurrent: (generation: string) => generation === "test-generation",
+  registerAgentEventLifecycleRotationHandler: vi.fn(),
+}));
+
+import {
+  handleCompactionEnd,
+  handleCompactionStart,
+} from "../agents/embedded-agent-subscribe.handlers.compaction.js";
+
+describe("compaction hook wiring", () => {
+  beforeEach(() => {
     hookMocks.runner.hasHooks.mockClear();
     hookMocks.runner.hasHooks.mockReturnValue(false);
     hookMocks.runner.runBeforeCompaction.mockClear();
@@ -26,14 +38,6 @@ describe("compaction hook wiring", () => {
     hookMocks.runner.runAfterCompaction.mockClear();
     hookMocks.runner.runAfterCompaction.mockResolvedValue(undefined);
     hookMocks.emitAgentEvent.mockClear();
-    vi.doMock("../plugins/hook-runner-global.js", () => ({
-      getGlobalHookRunner: () => hookMocks.runner,
-    }));
-    vi.doMock("../infra/agent-events.js", () => ({
-      emitAgentEvent: hookMocks.emitAgentEvent,
-    }));
-    ({ handleAutoCompactionStart, handleAutoCompactionEnd } =
-      await import("../agents/pi-embedded-subscribe.handlers.compaction.js"));
   });
 
   function createCompactionEndCtx(params: {
@@ -54,10 +58,12 @@ describe("compaction hook wiring", () => {
         },
       },
       state: { compactionInFlight: true },
-      log: { debug: vi.fn(), warn: vi.fn() },
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
       maybeResolveCompactionWait: vi.fn(),
       incrementCompactionCount: vi.fn(),
       getCompactionCount: () => params.compactionCount ?? 0,
+      noteCompactionTokensAfter: vi.fn(),
+      getLastCompactionTokensAfter: vi.fn(() => undefined),
       ...(params.withRetryHooks
         ? {
             noteCompactionRetry: vi.fn(),
@@ -67,7 +73,64 @@ describe("compaction hook wiring", () => {
     };
   }
 
-  it("calls runBeforeCompaction in handleAutoCompactionStart", () => {
+  function getBeforeCompactionCall() {
+    const beforeCalls = hookMocks.runner.runBeforeCompaction.mock.calls as unknown as Array<
+      [unknown, unknown]
+    >;
+    return {
+      event: beforeCalls[0]?.[0] as
+        | { messageCount?: number; messages?: unknown[]; sessionFile?: string }
+        | undefined,
+      hookCtx: beforeCalls[0]?.[1] as { sessionKey?: string } | undefined,
+    };
+  }
+
+  function getAfterCompactionCall() {
+    const afterCalls = hookMocks.runner.runAfterCompaction.mock.calls as unknown as Array<
+      [unknown, unknown]
+    >;
+    return {
+      event: afterCalls[0]?.[0] as
+        | { messageCount?: number; compactedCount?: number; sessionFile?: string }
+        | undefined,
+      hookCtx: afterCalls[0]?.[1] as { sessionKey?: string } | undefined,
+    };
+  }
+
+  function expectCompactionEvent(params: {
+    call: ReturnType<typeof getBeforeCompactionCall> | ReturnType<typeof getAfterCompactionCall>;
+    expectedEvent: Record<string, unknown>;
+    expectedSessionKey?: string;
+  }) {
+    expect(params.call.event).toEqual(params.expectedEvent);
+    if (params.expectedSessionKey !== undefined) {
+      if (!params.call.hookCtx) {
+        throw new Error("Expected compaction hook context");
+      }
+      expect(params.call.hookCtx).toEqual({ sessionKey: params.expectedSessionKey });
+    }
+  }
+
+  function runCompactionEnd(
+    ctx: ReturnType<typeof createCompactionEndCtx> | Record<string, unknown>,
+    event: {
+      outcome:
+        | { status: "completed"; tokensBefore: number; tokensAfter: number; willRetry: boolean }
+        | { status: "skipped" | "failed"; reason: string }
+        | { status: "aborted" };
+    },
+  ) {
+    handleCompactionEnd(
+      ctx as never,
+      {
+        type: "compaction_end",
+        reason: "threshold",
+        ...event,
+      } as never,
+    );
+  }
+
+  it("calls runBeforeCompaction in handleCompactionStart", () => {
     hookMocks.runner.hasHooks.mockReturnValue(true);
 
     const ctx = {
@@ -78,26 +141,23 @@ describe("compaction hook wiring", () => {
         onAgentEvent: vi.fn(),
       },
       state: { compactionInFlight: false },
-      log: { debug: vi.fn(), warn: vi.fn() },
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
       incrementCompactionCount: vi.fn(),
       ensureCompactionPromise: vi.fn(),
     };
 
-    handleAutoCompactionStart(ctx as never);
+    handleCompactionStart(ctx as never, { type: "compaction_start", reason: "threshold" });
 
     expect(hookMocks.runner.runBeforeCompaction).toHaveBeenCalledTimes(1);
-
-    const beforeCalls = hookMocks.runner.runBeforeCompaction.mock.calls as unknown as Array<
-      [unknown, unknown]
-    >;
-    const event = beforeCalls[0]?.[0] as
-      | { messageCount?: number; messages?: unknown[]; sessionFile?: string }
-      | undefined;
-    expect(event?.messageCount).toBe(3);
-    expect(event?.messages).toEqual([1, 2, 3]);
-    expect(event?.sessionFile).toBe("/tmp/test.jsonl");
-    const hookCtx = beforeCalls[0]?.[1] as { sessionKey?: string } | undefined;
-    expect(hookCtx?.sessionKey).toBe("agent:main:web-abc123");
+    expectCompactionEvent({
+      call: getBeforeCompactionCall(),
+      expectedEvent: {
+        messageCount: 3,
+        messages: [1, 2, 3],
+        sessionFile: "/tmp/test.jsonl",
+      },
+      expectedSessionKey: "agent:main:web-abc123",
+    });
     expect(ctx.ensureCompactionPromise).toHaveBeenCalledTimes(1);
     expect(hookMocks.emitAgentEvent).toHaveBeenCalledWith({
       runId: "r1",
@@ -121,34 +181,32 @@ describe("compaction hook wiring", () => {
       compactionCount: 1,
     });
 
-    handleAutoCompactionEnd(
-      ctx as never,
-      {
-        type: "auto_compaction_end",
-        willRetry: false,
-        result: { summary: "compacted" },
-      } as never,
-    );
+    runCompactionEnd(ctx, {
+      outcome: { status: "completed", tokensBefore: 100, tokensAfter: 50, willRetry: false },
+    });
 
     expect(hookMocks.runner.runAfterCompaction).toHaveBeenCalledTimes(1);
-
-    const afterCalls = hookMocks.runner.runAfterCompaction.mock.calls as unknown as Array<
-      [unknown, unknown]
-    >;
-    const event = afterCalls[0]?.[0] as
-      | { messageCount?: number; compactedCount?: number; sessionFile?: string }
-      | undefined;
-    expect(event?.messageCount).toBe(2);
-    expect(event?.compactedCount).toBe(1);
-    expect(event?.sessionFile).toBe("/tmp/session.jsonl");
-    const hookCtx = afterCalls[0]?.[1] as { sessionKey?: string } | undefined;
-    expect(hookCtx?.sessionKey).toBe("agent:main:web-xyz");
+    expectCompactionEvent({
+      call: getAfterCompactionCall(),
+      expectedEvent: {
+        messageCount: 2,
+        compactedCount: 1,
+        sessionFile: "/tmp/session.jsonl",
+      },
+      expectedSessionKey: "agent:main:web-xyz",
+    });
     expect(ctx.incrementCompactionCount).toHaveBeenCalledTimes(1);
+    expect(ctx.noteCompactionTokensAfter).toHaveBeenCalledWith(50);
     expect(ctx.maybeResolveCompactionWait).toHaveBeenCalledTimes(1);
     expect(hookMocks.emitAgentEvent).toHaveBeenCalledWith({
       runId: "r2",
       stream: "compaction",
-      data: { phase: "end", willRetry: false, completed: true },
+      data: {
+        phase: "end",
+        outcome: "completed",
+        willRetry: false,
+        completed: true,
+      },
     });
   });
 
@@ -161,14 +219,9 @@ describe("compaction hook wiring", () => {
       withRetryHooks: true,
     });
 
-    handleAutoCompactionEnd(
-      ctx as never,
-      {
-        type: "auto_compaction_end",
-        willRetry: true,
-        result: { summary: "compacted" },
-      } as never,
-    );
+    runCompactionEnd(ctx, {
+      outcome: { status: "completed", tokensBefore: 100, tokensAfter: 50, willRetry: true },
+    });
 
     expect(hookMocks.runner.runAfterCompaction).not.toHaveBeenCalled();
     // Counter is incremented even with willRetry — compaction succeeded (#38905)
@@ -179,55 +232,26 @@ describe("compaction hook wiring", () => {
     expect(hookMocks.emitAgentEvent).toHaveBeenCalledWith({
       runId: "r3",
       stream: "compaction",
-      data: { phase: "end", willRetry: true, completed: true },
+      data: {
+        phase: "end",
+        outcome: "completed",
+        willRetry: true,
+        completed: true,
+      },
     });
   });
 
-  it("does not increment counter when compaction was aborted", () => {
-    const ctx = createCompactionEndCtx({ runId: "r3b" });
-
-    handleAutoCompactionEnd(
-      ctx as never,
+  it.each([
+    ["does not increment counter when compaction was aborted", { outcome: { status: "aborted" } }],
+    [
+      "does not increment counter when compaction was skipped",
       {
-        type: "auto_compaction_end",
-        willRetry: false,
-        result: undefined,
-        aborted: true,
-      } as never,
-    );
-
-    expect(ctx.incrementCompactionCount).not.toHaveBeenCalled();
-  });
-
-  it("does not increment counter when compaction has result but was aborted", () => {
-    const ctx = createCompactionEndCtx({ runId: "r3b2" });
-
-    handleAutoCompactionEnd(
-      ctx as never,
-      {
-        type: "auto_compaction_end",
-        willRetry: false,
-        result: { summary: "compacted" },
-        aborted: true,
-      } as never,
-    );
-
-    expect(ctx.incrementCompactionCount).not.toHaveBeenCalled();
-  });
-
-  it("does not increment counter when result is undefined", () => {
+        outcome: { status: "skipped", reason: "Nothing to compact (session too small)" },
+      },
+    ],
+  ] as const)("%s", (_name, event) => {
     const ctx = createCompactionEndCtx({ runId: "r3c" });
-
-    handleAutoCompactionEnd(
-      ctx as never,
-      {
-        type: "auto_compaction_end",
-        willRetry: false,
-        result: undefined,
-        aborted: false,
-      } as never,
-    );
-
+    runCompactionEnd(ctx, event);
     expect(ctx.incrementCompactionCount).not.toHaveBeenCalled();
   });
 
@@ -249,20 +273,17 @@ describe("compaction hook wiring", () => {
     const ctx = {
       params: { runId: "r4", session: { messages } },
       state: { compactionInFlight: true },
-      log: { debug: vi.fn(), warn: vi.fn() },
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
       maybeResolveCompactionWait: vi.fn(),
       getCompactionCount: () => 1,
       incrementCompactionCount: vi.fn(),
+      noteCompactionTokensAfter: vi.fn(),
+      getLastCompactionTokensAfter: vi.fn(() => undefined),
     };
 
-    handleAutoCompactionEnd(
-      ctx as never,
-      {
-        type: "auto_compaction_end",
-        willRetry: false,
-        result: { summary: "compacted" },
-      } as never,
-    );
+    runCompactionEnd(ctx, {
+      outcome: { status: "completed", tokensBefore: 100, tokensAfter: 50, willRetry: false },
+    });
 
     const assistantOne = messages[1] as { usage?: unknown };
     const assistantTwo = messages[2] as { usage?: unknown };
@@ -282,19 +303,17 @@ describe("compaction hook wiring", () => {
     const ctx = {
       params: { runId: "r5", session: { messages } },
       state: { compactionInFlight: true },
-      log: { debug: vi.fn(), warn: vi.fn() },
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
       noteCompactionRetry: vi.fn(),
       resetForCompactionRetry: vi.fn(),
+      incrementCompactionCount: vi.fn(),
       getCompactionCount: () => 0,
+      noteCompactionTokensAfter: vi.fn(),
     };
 
-    handleAutoCompactionEnd(
-      ctx as never,
-      {
-        type: "auto_compaction_end",
-        willRetry: true,
-      } as never,
-    );
+    runCompactionEnd(ctx, {
+      outcome: { status: "completed", tokensBefore: 100, tokensAfter: 50, willRetry: true },
+    });
 
     const assistant = messages[0] as { usage?: unknown };
     expect(assistant.usage).toEqual({ totalTokens: 184_297, input: 130_000, output: 2_000 });

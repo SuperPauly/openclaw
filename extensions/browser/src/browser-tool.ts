@@ -1,140 +1,142 @@
-import crypto from "node:crypto";
+/**
+ * Browser agent tool registration.
+ *
+ * Builds the model-facing browser tool, chooses sandbox/host/node routing, and
+ * maps high-level actions onto browser control client calls.
+ */
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
+import {
+  createBrowserNodeProxyRequest,
+  createBrowserNodeSessionTabRoute,
+} from "./browser-node-proxy.js";
+import { resolveBrowserNodeTarget } from "./browser-node-routing.js";
+import { applyBrowserTabToolBinding, parseBrowserTabToolBinding } from "./browser-tool-binding.js";
+import { describeBrowserTool } from "./browser-tool-description.js";
+import {
+  createBrowserToolSessionTabs,
+  stripBrowserOpenInternalMetadata,
+} from "./browser-tool-session-tabs.js";
 import {
   executeActAction,
   executeConsoleAction,
-  executeSnapshotAction,
+  executeDownloadAction,
   executeTabsAction,
+  formatBrowserExternalToolResult,
 } from "./browser-tool.actions.js";
-import { BrowserToolSchema } from "./browser-tool.schema.js";
 import {
   type AnyAgentTool,
-  type NodeListNode,
-  DEFAULT_UPLOAD_DIR,
-  applyBrowserProxyPaths,
+  BrowserToolOutputSchema,
+  createBrowserToolSchema,
+  resolveBrowserToolCapabilities,
+  type BrowserToolCapabilities,
   browserAct,
   browserArmDialog,
   browserArmFileChooser,
   browserCloseTab,
+  browserDoctor,
   browserFocusTab,
+  browserImportProfile,
   browserNavigate,
   browserOpenTab,
   browserPdfSave,
   browserProfiles,
+  browserSystemProfiles,
   browserScreenshotAction,
   browserStart,
   browserStatus,
   browserStop,
+  describeImageFile,
+  getRuntimeConfig,
   getBrowserProfileCapabilities,
   imageResultFromFile,
   jsonResult,
   listNodes,
-  loadConfig,
-  persistBrowserProxyFiles,
+  normalizeOptionalString,
+  readPositiveIntegerParam,
   readStringParam,
+  readStringValue,
   resolveBrowserConfig,
-  resolveExistingPathsWithinRoot,
-  resolveNodeIdFromList,
+  resolveExistingUploadPaths,
+  resolveRuntimeImageSanitization,
   resolveProfile,
-  selectDefaultNodeFromList,
+  saveMediaBuffer,
+  stageBrowserScreenshotForSharing,
+  touchSessionBrowserTab,
   trackSessionBrowserTab,
   untrackSessionBrowserTab,
-} from "./core-api.js";
-import { callGatewayTool } from "./core-api.js";
+} from "./browser-tool.runtime.js";
+import { appendNavigatedPageState, executeSnapshotAction } from "./browser-tool.snapshot.js";
+import { resolveBrowserNavigationTimeoutMs } from "./browser/act-policy.js";
+import { DEFAULT_BROWSER_SCREENSHOT_TIMEOUT_MS } from "./browser/constants.js";
+import { parseBrowserNavigationUrl } from "./browser/navigation-guard.js";
+import { normalizeBrowserScreenshot } from "./browser/screenshot.js";
+import { parseSystemProfileDomains } from "./browser/system-profile-domains.js";
+import { describeBrowserScreenshot, neutralizeMediaDirectives } from "./browser/vision.js";
+import { wrapExternalContent } from "./sdk-security-runtime.js";
 
 const browserToolDeps = {
   browserAct,
   browserArmDialog,
   browserArmFileChooser,
   browserCloseTab,
+  browserDoctor,
   browserFocusTab,
+  browserImportProfile,
   browserNavigate,
   browserOpenTab,
   browserPdfSave,
   browserProfiles,
+  browserSystemProfiles,
   browserScreenshotAction,
   browserStart,
   browserStatus,
   browserStop,
+  describeImageFile,
+  getRuntimeConfig,
   imageResultFromFile,
-  loadConfig,
   listNodes,
-  callGatewayTool,
+  normalizeBrowserScreenshot,
+  saveMediaBuffer,
+  stageBrowserScreenshotForSharing,
+  touchSessionBrowserTab,
   trackSessionBrowserTab,
   untrackSessionBrowserTab,
 };
 
-export const __testing = {
-  setDepsForTest(
-    overrides: Partial<{
-      browserAct: typeof browserAct;
-      browserArmDialog: typeof browserArmDialog;
-      browserArmFileChooser: typeof browserArmFileChooser;
-      browserCloseTab: typeof browserCloseTab;
-      browserFocusTab: typeof browserFocusTab;
-      browserNavigate: typeof browserNavigate;
-      browserOpenTab: typeof browserOpenTab;
-      browserPdfSave: typeof browserPdfSave;
-      browserProfiles: typeof browserProfiles;
-      browserScreenshotAction: typeof browserScreenshotAction;
-      browserStart: typeof browserStart;
-      browserStatus: typeof browserStatus;
-      browserStop: typeof browserStop;
-      imageResultFromFile: typeof imageResultFromFile;
-      loadConfig: typeof loadConfig;
-      listNodes: typeof listNodes;
-      callGatewayTool: typeof callGatewayTool;
-      trackSessionBrowserTab: typeof trackSessionBrowserTab;
-      untrackSessionBrowserTab: typeof untrackSessionBrowserTab;
-    }> | null,
-  ) {
-    browserToolDeps.browserAct = overrides?.browserAct ?? browserAct;
-    browserToolDeps.browserArmDialog = overrides?.browserArmDialog ?? browserArmDialog;
-    browserToolDeps.browserArmFileChooser =
-      overrides?.browserArmFileChooser ?? browserArmFileChooser;
-    browserToolDeps.browserCloseTab = overrides?.browserCloseTab ?? browserCloseTab;
-    browserToolDeps.browserFocusTab = overrides?.browserFocusTab ?? browserFocusTab;
-    browserToolDeps.browserNavigate = overrides?.browserNavigate ?? browserNavigate;
-    browserToolDeps.browserOpenTab = overrides?.browserOpenTab ?? browserOpenTab;
-    browserToolDeps.browserPdfSave = overrides?.browserPdfSave ?? browserPdfSave;
-    browserToolDeps.browserProfiles = overrides?.browserProfiles ?? browserProfiles;
-    browserToolDeps.browserScreenshotAction =
-      overrides?.browserScreenshotAction ?? browserScreenshotAction;
-    browserToolDeps.browserStart = overrides?.browserStart ?? browserStart;
-    browserToolDeps.browserStatus = overrides?.browserStatus ?? browserStatus;
-    browserToolDeps.browserStop = overrides?.browserStop ?? browserStop;
-    browserToolDeps.imageResultFromFile = overrides?.imageResultFromFile ?? imageResultFromFile;
-    browserToolDeps.loadConfig = overrides?.loadConfig ?? loadConfig;
-    browserToolDeps.listNodes = overrides?.listNodes ?? listNodes;
-    browserToolDeps.callGatewayTool = overrides?.callGatewayTool ?? callGatewayTool;
-    browserToolDeps.trackSessionBrowserTab =
-      overrides?.trackSessionBrowserTab ?? trackSessionBrowserTab;
-    browserToolDeps.untrackSessionBrowserTab =
-      overrides?.untrackSessionBrowserTab ?? untrackSessionBrowserTab;
-  },
-};
-
 function readOptionalTargetAndTimeout(params: Record<string, unknown>) {
-  const targetId = typeof params.targetId === "string" ? params.targetId.trim() : undefined;
-  const timeoutMs =
-    typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs)
-      ? params.timeoutMs
-      : undefined;
+  const targetId = normalizeOptionalString(params.targetId);
+  const timeoutMs = readPositiveIntegerParam(params, "timeoutMs", {
+    message: "timeoutMs must be a positive integer.",
+  });
   return { targetId, timeoutMs };
 }
 
 function readTargetUrlParam(params: Record<string, unknown>) {
-  return (
+  const targetUrl =
     readStringParam(params, "targetUrl") ??
-    readStringParam(params, "url", { required: true, label: "targetUrl" })
-  );
+    readStringParam(params, "url", { required: true, label: "targetUrl" });
+  parseBrowserNavigationUrl(targetUrl);
+  return targetUrl;
 }
 
+function formatScreenshotShareHint(filePath: string): string {
+  return `[Screenshot saved to ${JSON.stringify(filePath)}. A sanitized outbound copy is ready at this path for explicit sharing.]`;
+}
+
+const SCREENSHOT_SHARE_UNAVAILABLE =
+  "[Screenshot sharing is unavailable because an outbound copy could not be prepared.]";
+
 const LEGACY_BROWSER_ACT_REQUEST_KEYS = [
+  "kind",
+  "actions",
+  "stopOnError",
   "targetId",
   "ref",
   "doubleClick",
   "button",
   "modifiers",
+  "x",
+  "y",
   "text",
   "submit",
   "slowly",
@@ -155,10 +157,31 @@ const LEGACY_BROWSER_ACT_REQUEST_KEYS = [
   "timeoutMs",
 ] as const;
 
+const LEGACY_BROWSER_ACT_SHARED_REQUEST_KEYS = new Set<
+  (typeof LEGACY_BROWSER_ACT_REQUEST_KEYS)[number]
+>(["targetId"]);
+
 function readActRequestParam(params: Record<string, unknown>) {
   const requestParam = params.request;
   if (requestParam && typeof requestParam === "object") {
-    return requestParam as Parameters<typeof browserAct>[1];
+    const request = { ...(requestParam as Record<string, unknown>) };
+    const hasMismatchedKind =
+      typeof request.kind === "string" &&
+      typeof params.kind === "string" &&
+      request.kind !== params.kind;
+    for (const key of LEGACY_BROWSER_ACT_REQUEST_KEYS) {
+      if (Object.hasOwn(request, key) || !Object.hasOwn(params, key)) {
+        continue;
+      }
+      // Flattened act fields are legacy shape repair. Only the tab scope is
+      // safe across kind mismatches; action-specific fields can corrupt the
+      // explicit nested request.
+      if (hasMismatchedKind && !LEGACY_BROWSER_ACT_SHARED_REQUEST_KEYS.has(key)) {
+        continue;
+      }
+      request[key] = params[key];
+    }
+    return request as Parameters<typeof browserAct>[1];
   }
 
   const kind = readStringParam(params, "kind");
@@ -166,7 +189,7 @@ function readActRequestParam(params: Record<string, unknown>) {
     return undefined;
   }
 
-  const request: Record<string, unknown> = { kind };
+  const request: Record<string, unknown> = {};
   for (const key of LEGACY_BROWSER_ACT_REQUEST_KEYS) {
     if (!Object.hasOwn(params, key)) {
       continue;
@@ -176,149 +199,59 @@ function readActRequestParam(params: Record<string, unknown>) {
   return request as Parameters<typeof browserAct>[1];
 }
 
-type BrowserProxyFile = {
-  path: string;
-  base64: string;
-  mimeType?: string;
-};
-
-type BrowserProxyResult = {
-  result: unknown;
-  files?: BrowserProxyFile[];
-};
-
-const DEFAULT_BROWSER_PROXY_TIMEOUT_MS = 20_000;
-const BROWSER_PROXY_GATEWAY_TIMEOUT_SLACK_MS = 5_000;
-
 type BrowserNodeTarget = {
   nodeId: string;
   label?: string;
+  commands: string[];
+  pendingDeclaredCommands: string[];
 };
 
-function isBrowserNode(node: NodeListNode) {
-  const caps = Array.isArray(node.caps) ? node.caps : [];
-  const commands = Array.isArray(node.commands) ? node.commands : [];
-  return caps.includes("browser") || commands.includes("browser.proxy");
-}
-
-async function resolveBrowserNodeTarget(params: {
+async function resolveBrowserToolNodeTarget(params: {
   requestedNode?: string;
   target?: "sandbox" | "host" | "node";
   sandboxBridgeUrl?: string;
+  allowHostControl?: boolean;
+  signal?: AbortSignal;
 }): Promise<BrowserNodeTarget | null> {
-  const cfg = browserToolDeps.loadConfig();
+  if (params.allowHostControl === false) {
+    if (params.target === "node" || params.requestedNode) {
+      throw new Error("Node browser control is disabled by sandbox policy.");
+    }
+    return null;
+  }
+
+  const cfg = browserToolDeps.getRuntimeConfig();
   const policy = cfg.gateway?.nodes?.browser;
-  const mode = policy?.mode ?? "auto";
-  if (mode === "off") {
-    if (params.target === "node" || params.requestedNode) {
-      throw new Error("Node browser proxy is disabled (gateway.nodes.browser.mode=off).");
-    }
+  const explicitTarget = params.target === "node";
+  const requestedNode = params.requestedNode?.trim();
+  if (policy?.mode === "off") {
+    resolveBrowserNodeTarget({ nodes: [], policy, requestedNode, explicitTarget });
     return null;
   }
-  if (params.sandboxBridgeUrl?.trim() && params.target !== "node" && !params.requestedNode) {
+  if (params.sandboxBridgeUrl?.trim() && !explicitTarget && !requestedNode) {
     return null;
   }
-  if (params.target && params.target !== "node") {
+  if (params.target && !explicitTarget) {
     return null;
   }
-  if (mode === "manual" && params.target !== "node" && !params.requestedNode) {
+  if (policy?.mode === "manual" && !explicitTarget && !requestedNode && !policy.node?.trim()) {
     return null;
   }
-
-  const nodes = await browserToolDeps.listNodes({});
-  const browserNodes = nodes.filter((node) => node.connected && isBrowserNode(node));
-  if (browserNodes.length === 0) {
-    if (params.target === "node" || params.requestedNode) {
-      throw new Error("No connected browser-capable nodes.");
-    }
-    return null;
-  }
-
-  const requested = params.requestedNode?.trim() || policy?.node?.trim();
-  if (requested) {
-    const nodeId = resolveNodeIdFromList(browserNodes, requested, false);
-    const node = browserNodes.find((entry) => entry.nodeId === nodeId);
-    return { nodeId, label: node?.displayName ?? node?.remoteIp ?? nodeId };
-  }
-
-  const selected = selectDefaultNodeFromList(browserNodes, {
-    preferLocalMac: false,
-    fallback: "none",
+  const node = resolveBrowserNodeTarget({
+    nodes: await browserToolDeps.listNodes({}, params.signal),
+    policy,
+    requestedNode,
+    explicitTarget,
+    requireConnected: true,
   });
-
-  if (params.target === "node") {
-    if (selected) {
-      return {
-        nodeId: selected.nodeId,
-        label: selected.displayName ?? selected.remoteIp ?? selected.nodeId,
-      };
-    }
-    throw new Error(
-      `Multiple browser-capable nodes connected (${browserNodes.length}). Set gateway.nodes.browser.node or pass node=<id>.`,
-    );
-  }
-
-  if (mode === "manual") {
-    return null;
-  }
-
-  if (selected) {
-    return {
-      nodeId: selected.nodeId,
-      label: selected.displayName ?? selected.remoteIp ?? selected.nodeId,
-    };
-  }
-  return null;
-}
-
-async function callBrowserProxy(params: {
-  nodeId: string;
-  method: string;
-  path: string;
-  query?: Record<string, string | number | boolean | undefined>;
-  body?: unknown;
-  timeoutMs?: number;
-  profile?: string;
-}): Promise<BrowserProxyResult> {
-  const proxyTimeoutMs =
-    typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs)
-      ? Math.max(1, Math.floor(params.timeoutMs))
-      : DEFAULT_BROWSER_PROXY_TIMEOUT_MS;
-  const gatewayTimeoutMs = proxyTimeoutMs + BROWSER_PROXY_GATEWAY_TIMEOUT_SLACK_MS;
-  const payload = await browserToolDeps.callGatewayTool<{ payloadJSON?: string; payload?: string }>(
-    "node.invoke",
-    { timeoutMs: gatewayTimeoutMs },
-    {
-      nodeId: params.nodeId,
-      command: "browser.proxy",
-      params: {
-        method: params.method,
-        path: params.path,
-        query: params.query,
-        body: params.body,
-        timeoutMs: proxyTimeoutMs,
-        profile: params.profile,
-      },
-      idempotencyKey: crypto.randomUUID(),
-    },
-  );
-  const parsed =
-    payload?.payload ??
-    (typeof payload?.payloadJSON === "string" && payload.payloadJSON
-      ? (JSON.parse(payload.payloadJSON) as BrowserProxyResult)
-      : null);
-  if (!parsed || typeof parsed !== "object" || !("result" in parsed)) {
-    throw new Error("browser proxy failed");
-  }
-  return parsed;
-}
-
-async function persistProxyFiles(files: BrowserProxyFile[] | undefined) {
-  return await persistBrowserProxyFiles(files);
-}
-
-function applyProxyPaths(result: unknown, mapping: Map<string, string>) {
-  applyBrowserProxyPaths(result, mapping);
+  return node
+    ? {
+        nodeId: node.nodeId,
+        label: node.displayName ?? node.remoteIp ?? node.nodeId,
+        commands: node.commands ?? [],
+        pendingDeclaredCommands: node.pendingDeclaredCommands ?? [],
+      }
+    : null;
 }
 
 function resolveBrowserBaseUrl(params: {
@@ -326,7 +259,7 @@ function resolveBrowserBaseUrl(params: {
   sandboxBridgeUrl?: string;
   allowHostControl?: boolean;
 }): string | undefined {
-  const cfg = loadConfig();
+  const cfg = getRuntimeConfig();
   const resolved = resolveBrowserConfig(cfg.browser, cfg);
   const normalizedSandbox = params.sandboxBridgeUrl?.trim() ?? "";
   const target = params.target ?? (normalizedSandbox ? "sandbox" : "host");
@@ -351,74 +284,211 @@ function resolveBrowserBaseUrl(params: {
   return undefined;
 }
 
-function shouldPreferHostForProfile(profileName: string | undefined) {
-  if (!profileName) {
-    return false;
+const unavailableSystemProfiles = (unavailableReason: string) => ({
+  profiles: [],
+  unavailableReason,
+});
+
+/**
+ * Read importable system profiles from the host control server. Discovery must
+ * match where import runs (host-local), so it never uses a node proxy or the
+ * sandbox base URL. Other profile sources remain useful when host discovery
+ * is unavailable, so failures become an explicit degradation fact.
+ */
+async function readHostSystemProfiles(params: {
+  allowHostControl?: boolean;
+  sandboxBridgeUrl?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}) {
+  if (params.allowHostControl === false) {
+    return unavailableSystemProfiles(
+      "Host system profile discovery is disabled by sandbox policy; enable host control to discover importable system profiles.",
+    );
   }
-  const cfg = browserToolDeps.loadConfig();
-  const resolved = resolveBrowserConfig(cfg.browser, cfg);
-  const profile = resolveProfile(resolved, profileName);
-  if (!profile) {
-    return false;
+  let hostBaseUrl: string | undefined;
+  try {
+    hostBaseUrl = resolveBrowserBaseUrl({
+      target: "host",
+      sandboxBridgeUrl: params.sandboxBridgeUrl,
+      allowHostControl: params.allowHostControl,
+    });
+  } catch {
+    return unavailableSystemProfiles(
+      'Host browser control is unavailable; enable it and retry action=profiles target="host".',
+    );
   }
-  const capabilities = getBrowserProfileCapabilities(profile);
-  return capabilities.usesChromeMcp;
+  try {
+    return {
+      profiles: await browserToolDeps.browserSystemProfiles(hostBaseUrl, {
+        timeoutMs: params.timeoutMs,
+        signal: params.signal,
+      }),
+      unavailableReason: undefined,
+    };
+  } catch {
+    params.signal?.throwIfAborted();
+    return unavailableSystemProfiles(
+      'Host system profile discovery failed; retry action=profiles target="host" after host browser control is available.',
+    );
+  }
 }
 
+const DEFAULT_EXISTING_SESSION_MANAGE_TIMEOUT_MS = 45_000;
+const EXISTING_SESSION_MANAGE_ACTIONS = new Set([
+  "status",
+  "start",
+  "stop",
+  "profiles",
+  "tabs",
+  "open",
+  "focus",
+  "close",
+]);
+
+function hasExistingSessionProfile(resolved: ReturnType<typeof resolveBrowserConfig>) {
+  return Object.keys(resolved.profiles).some((name) => {
+    const candidate = resolveProfile(resolved, name);
+    return candidate ? getBrowserProfileCapabilities(candidate).usesChromeMcp : false;
+  });
+}
+
+function readToolTimeoutMs(params: Record<string, unknown>) {
+  return readPositiveIntegerParam(params, "timeoutMs", {
+    message: "timeoutMs must be a positive integer.",
+  });
+}
+
+/** Create the Browser tool exposed to agents. */
 export function createBrowserTool(opts?: {
   sandboxBridgeUrl?: string;
   allowHostControl?: boolean;
   agentSessionKey?: string;
+  agentId?: string;
+  agentDir?: string;
+  workspaceDir?: string;
+  activeModel?: {
+    provider?: string;
+    model?: string;
+  };
+  screenshotResultMode?: "image" | "path";
+  persistScreenshot?: (params: {
+    sourcePath: string;
+    type: "png" | "jpeg";
+    targetId?: string;
+  }) => Promise<string>;
+  mediaScope?: {
+    sessionKey?: string;
+    channel?: string;
+    chatType?: string;
+  };
+  runToolBinding?: unknown;
+  toolCapabilities?: BrowserToolCapabilities;
 }): AnyAgentTool {
+  const bindingResult =
+    opts?.runToolBinding === undefined
+      ? undefined
+      : parseBrowserTabToolBinding(opts.runToolBinding);
+  if (bindingResult && !bindingResult.ok) {
+    throw new Error(`invalid browser run binding: ${bindingResult.error}`);
+  }
+  const capabilities =
+    opts?.toolCapabilities ??
+    (() => {
+      const config = browserToolDeps.getRuntimeConfig();
+      const boundProfile =
+        bindingResult?.ok && bindingResult.binding.target === "host"
+          ? resolveProfile(
+              resolveBrowserConfig(config.browser, config),
+              bindingResult.binding.profile,
+            )
+          : undefined;
+      return resolveBrowserToolCapabilities({
+        tabBound: bindingResult?.ok,
+        evaluateEnabled: config.browser?.evaluateEnabled !== false,
+        ...(boundProfile
+          ? { profileCapabilities: getBrowserProfileCapabilities(boundProfile) }
+          : {}),
+      });
+    })();
   const targetDefault = opts?.sandboxBridgeUrl ? "sandbox" : "host";
   const hostHint =
     opts?.allowHostControl === false ? "Host target blocked by policy." : "Host target allowed.";
   return {
     label: "Browser",
     name: "browser",
-    description: [
-      "Control the browser via OpenClaw's browser control server (status/start/stop/profiles/tabs/open/snapshot/screenshot/actions).",
-      "Browser choice: omit profile by default for the isolated OpenClaw-managed browser (`openclaw`).",
-      'For the logged-in user browser on the local host, use profile="user". A supported Chromium-based browser (v144+) must be running. Use only when existing logins/cookies matter and the user is present.',
-      'When a node-hosted browser proxy is available, the tool may auto-route to it. Pin a node with node=<id|name> or target="node".',
-      "When using refs from snapshot (e.g. e12), keep the same tab: prefer passing targetId from the snapshot response into subsequent actions (act/click/type/etc).",
-      'For stable, self-resolving refs across calls, use snapshot with refs="aria" (Playwright aria-ref ids). Default refs="role" are role+name-based.',
-      "Use snapshot+act for UI automation. Avoid act:wait by default; use only in exceptional cases when no reliable UI state exists.",
-      `target selects browser location (sandbox|host|node). Default: ${targetDefault}.`,
-      hostHint,
-    ].join(" "),
-    parameters: BrowserToolSchema,
-    execute: async (_toolCallId, args) => {
-      const params = args as Record<string, unknown>;
+    resultContentSource: "network",
+    description: describeBrowserTool({ targetDefault, hostHint, capabilities }),
+    parameters: createBrowserToolSchema(capabilities),
+    outputSchema: BrowserToolOutputSchema,
+    execute: async (_toolCallId, args, signal) => {
+      const params = bindingResult?.ok
+        ? applyBrowserTabToolBinding(args as Record<string, unknown>, bindingResult.binding)
+        : (args as Record<string, unknown>);
       const action = readStringParam(params, "action", { required: true });
-      const profile = readStringParam(params, "profile");
+      if (!capabilities.actions.some((candidate) => candidate === action)) {
+        throw new Error(`browser action ${JSON.stringify(action)} is unavailable for this run`);
+      }
+      const requestedProfile = readStringParam(params, "profile");
       const requestedNode = readStringParam(params, "node");
+      const requestedTimeoutMs = readToolTimeoutMs(params);
       let target = readStringParam(params, "target") as "sandbox" | "host" | "node" | undefined;
+      const runtimeConfig = browserToolDeps.getRuntimeConfig();
+      const resolvedBrowser = resolveBrowserConfig(runtimeConfig.browser, runtimeConfig);
+      const effectiveProfile = requestedProfile ?? resolvedBrowser.defaultProfile;
+      const resolvedProfile = resolveProfile(resolvedBrowser, effectiveProfile);
+      const profileCapabilities = resolvedProfile
+        ? getBrowserProfileCapabilities(resolvedProfile)
+        : undefined;
+      let profile = profileCapabilities?.usesChromeMcp ? effectiveProfile : requestedProfile;
+      const configuredNode = runtimeConfig.gateway?.nodes?.browser?.node?.trim();
 
       if (requestedNode && target && target !== "node") {
         throw new Error('node is only supported with target="node".');
       }
-      // User-browser profiles (existing-session) are host-only.
-      const isUserBrowserProfile = shouldPreferHostForProfile(profile);
-      if (isUserBrowserProfile) {
-        if (requestedNode || target === "node") {
-          throw new Error(`profile="${profile}" only supports the local host browser.`);
+
+      // System-profile import reads the local macOS Keychain and Chrome profile,
+      // so it can only run on the host. Pin it before target/node resolution so a
+      // sandbox default or auto-selected browser node never receives the request.
+      if (action === "importprofile") {
+        if (target === "sandbox" || target === "node" || requestedNode) {
+          throw new Error(
+            'system profile import must run on the host; omit target or use target="host".',
+          );
         }
+        target = "host";
+      }
+      // existing-session profiles can attach through the selected host or browser node,
+      // but they must never fall back into the sandbox browser.
+      const isUserBrowserProfile = profileCapabilities?.usesChromeMcp === true;
+      if (isUserBrowserProfile) {
         if (target === "sandbox") {
           throw new Error(
             `profile="${profile}" cannot use the sandbox browser; use target="host" or omit target.`,
           );
         }
-        if (!target && !requestedNode) {
-          target = "host";
-        }
       }
 
-      const nodeTarget = await resolveBrowserNodeTarget({
-        requestedNode: requestedNode ?? undefined,
-        target,
-        sandboxBridgeUrl: opts?.sandboxBridgeUrl,
-      });
+      let nodeTarget: BrowserNodeTarget | null = null;
+      try {
+        nodeTarget = await resolveBrowserToolNodeTarget({
+          requestedNode: requestedNode ?? undefined,
+          target,
+          sandboxBridgeUrl: opts?.sandboxBridgeUrl,
+          allowHostControl: opts?.allowHostControl,
+          signal,
+        });
+      } catch (error) {
+        signal?.throwIfAborted();
+        // Keep the logged-in user browser usable on the host when auto-discovery
+        // of browser nodes fails transiently. Explicit node requests still fail.
+        if (!(isUserBrowserProfile && !target && !requestedNode && !configuredNode)) {
+          throw error;
+        }
+      }
+      if (isUserBrowserProfile && !target && !requestedNode && !nodeTarget) {
+        target = "host";
+      }
 
       const resolvedTarget = target === "node" ? undefined : target;
       const baseUrl = nodeTarget
@@ -429,122 +499,205 @@ export function createBrowserTool(opts?: {
             allowHostControl: opts?.allowHostControl,
           });
 
+      const allowAutomaticHostFallback = Boolean(
+        nodeTarget &&
+        !target &&
+        !requestedNode &&
+        !configuredNode &&
+        opts?.allowHostControl !== false,
+      );
       const proxyRequest = nodeTarget
-        ? async (opts: {
-            method: string;
-            path: string;
-            query?: Record<string, string | number | boolean | undefined>;
-            body?: unknown;
-            timeoutMs?: number;
-            profile?: string;
-          }) => {
-            const proxy = await callBrowserProxy({
-              nodeId: nodeTarget.nodeId,
-              method: opts.method,
-              path: opts.path,
-              query: opts.query,
-              body: opts.body,
-              timeoutMs: opts.timeoutMs,
-              profile: opts.profile,
-            });
-            const mapping = await persistProxyFiles(proxy.files);
-            applyProxyPaths(proxy.result, mapping);
-            return proxy.result;
-          }
+        ? createBrowserNodeProxyRequest({ nodeTarget, allowAutomaticHostFallback, signal })
         : null;
+      if (proxyRequest) {
+        // The node resolves omissions against its own config; Gateway defaults
+        // never cross this execution-owner boundary.
+        profile = requestedProfile;
+      }
+      const nodeRoute = nodeTarget ? createBrowserNodeSessionTabRoute(nodeTarget) : undefined;
+      const toolTimeoutMs =
+        requestedTimeoutMs ??
+        (EXISTING_SESSION_MANAGE_ACTIONS.has(action) &&
+        (isUserBrowserProfile ||
+          (action === "profiles" && hasExistingSessionProfile(resolvedBrowser)))
+          ? DEFAULT_EXISTING_SESSION_MANAGE_TIMEOUT_MS
+          : undefined);
+      const sessionTabs = createBrowserToolSessionTabs({
+        sessionKey: opts?.agentSessionKey,
+        requestedProfile: profile,
+        defaultProfile: resolvedBrowser.defaultProfile,
+        baseUrl,
+        nodeRoute,
+        routeProfile: () => {
+          const route = proxyRequest?.route();
+          return route?.status === "resolved" ? route.profile : undefined;
+        },
+        isHostFallbackActive: proxyRequest?.isHostFallbackActive,
+        registry: browserToolDeps,
+      });
+      const readBrowserStatus = async () =>
+        proxyRequest
+          ? await proxyRequest({
+              method: "GET",
+              path: "/",
+              profile,
+              timeoutMs: toolTimeoutMs,
+            })
+          : await browserToolDeps.browserStatus(baseUrl, {
+              profile,
+              timeoutMs: toolTimeoutMs,
+              signal,
+            });
+      const executeTrackedTabRequest = async (
+        path: string,
+        body: Record<string, unknown>,
+        runLocal: () => Promise<unknown>,
+      ) => {
+        const result = proxyRequest
+          ? await proxyRequest({ method: "POST", path, profile, body })
+          : await runLocal();
+        sessionTabs.touch(
+          readStringValue((result as { targetId?: unknown }).targetId) ??
+            readStringValue(body.targetId),
+        );
+        return jsonResult(result);
+      };
 
       switch (action) {
+        case "doctor":
+          return jsonResult(
+            proxyRequest
+              ? await proxyRequest({ method: "GET", path: "/doctor", profile })
+              : await browserToolDeps.browserDoctor(baseUrl, { profile, signal }),
+          );
         case "status":
-          if (proxyRequest) {
-            return jsonResult(
-              await proxyRequest({
-                method: "GET",
-                path: "/",
-                profile,
-              }),
-            );
-          }
-          return jsonResult(await browserToolDeps.browserStatus(baseUrl, { profile }));
+          return jsonResult(await readBrowserStatus());
         case "start":
+        case "stop": {
           if (proxyRequest) {
             await proxyRequest({
               method: "POST",
-              path: "/start",
+              path: `/${action}`,
               profile,
+              timeoutMs: toolTimeoutMs,
             });
-            return jsonResult(
-              await proxyRequest({
-                method: "GET",
-                path: "/",
-                profile,
-              }),
-            );
+          } else {
+            const updateBrowser =
+              action === "start" ? browserToolDeps.browserStart : browserToolDeps.browserStop;
+            await updateBrowser(baseUrl, { profile, timeoutMs: toolTimeoutMs, signal });
           }
-          await browserToolDeps.browserStart(baseUrl, { profile });
-          return jsonResult(await browserToolDeps.browserStatus(baseUrl, { profile }));
-        case "stop":
-          if (proxyRequest) {
-            await proxyRequest({
-              method: "POST",
-              path: "/stop",
-              profile,
+          return jsonResult(await readBrowserStatus());
+        }
+        case "profiles": {
+          // Importable system profiles are host-local (import runs on the host),
+          // so read them from the host regardless of the profiles action target;
+          // never let a node proxy or sandbox describe the wrong Chrome profiles.
+          const { profiles: systemProfiles, unavailableReason: systemProfilesUnavailable } =
+            await readHostSystemProfiles({
+              allowHostControl: opts?.allowHostControl,
+              sandboxBridgeUrl: opts?.sandboxBridgeUrl,
+              timeoutMs: toolTimeoutMs,
+              signal,
             });
-            return jsonResult(
-              await proxyRequest({
-                method: "GET",
-                path: "/",
-                profile,
-              }),
-            );
-          }
-          await browserToolDeps.browserStop(baseUrl, { profile });
-          return jsonResult(await browserToolDeps.browserStatus(baseUrl, { profile }));
-        case "profiles":
           if (proxyRequest) {
             const result = await proxyRequest({
               method: "GET",
               path: "/profiles",
+              timeoutMs: toolTimeoutMs,
             });
-            return jsonResult(result);
+            return jsonResult({
+              ...(result && typeof result === "object" ? result : { profiles: result }),
+              systemProfiles,
+              ...(systemProfilesUnavailable ? { systemProfilesUnavailable } : {}),
+            });
           }
-          return jsonResult({ profiles: await browserToolDeps.browserProfiles(baseUrl) });
-        case "tabs":
-          return await executeTabsAction({ baseUrl, profile, proxyRequest });
-        case "open": {
-          const targetUrl = readTargetUrlParam(params);
+          return jsonResult({
+            profiles: await browserToolDeps.browserProfiles(baseUrl, {
+              timeoutMs: toolTimeoutMs,
+              signal,
+            }),
+            systemProfiles,
+            ...(systemProfilesUnavailable ? { systemProfilesUnavailable } : {}),
+          });
+        }
+        case "importprofile": {
           if (proxyRequest) {
-            const result = await proxyRequest({
-              method: "POST",
-              path: "/tabs/open",
-              profile,
-              body: { url: targetUrl },
-            });
-            return jsonResult(result);
+            throw new Error("system profile import must run on the browser host");
           }
-          const opened = await browserToolDeps.browserOpenTab(baseUrl, targetUrl, { profile });
-          browserToolDeps.trackSessionBrowserTab({
-            sessionKey: opts?.agentSessionKey,
-            targetId: opened.targetId,
+          const domains = parseSystemProfileDomains(params.domains);
+          return jsonResult(
+            await browserToolDeps.browserImportProfile(baseUrl, {
+              browser: normalizeOptionalString(params.browser) ?? "chrome",
+              systemProfile: normalizeOptionalString(params.systemProfile) ?? "Default",
+              into: normalizeOptionalString(params.into) ?? "imported",
+              domains,
+              signal,
+            }),
+          );
+        }
+        case "tabs":
+          return await executeTabsAction({
             baseUrl,
             profile,
+            timeoutMs: toolTimeoutMs,
+            proxyRequest,
+            targetId: bindingResult?.ok ? bindingResult.binding.targetId : undefined,
+            signal,
           });
-          return jsonResult(opened);
+        case "open": {
+          const targetUrl = readTargetUrlParam(params);
+          const label = normalizeOptionalString(params.label);
+          const opened = proxyRequest
+            ? await proxyRequest({
+                method: "POST",
+                path: "/tabs/open",
+                profile,
+                body: { url: targetUrl, ...(label ? { label } : {}) },
+                timeoutMs: toolTimeoutMs,
+              })
+            : await browserToolDeps.browserOpenTab(baseUrl, targetUrl, {
+                profile,
+                label,
+                timeoutMs: toolTimeoutMs,
+                signal,
+              });
+          const closeOpenedTab = async (targetId: string, openedProfile?: string) => {
+            if (nodeRoute && !proxyRequest?.isHostFallbackActive()) {
+              await nodeRoute.closeTarget({ targetId, profile: openedProfile });
+              return;
+            }
+            await browserToolDeps.browserCloseTab(baseUrl, targetId, {
+              profile: openedProfile,
+              timeoutMs: toolTimeoutMs,
+            });
+          };
+          await sessionTabs.trackOpened(opened, closeOpenedTab);
+          return formatBrowserExternalToolResult({
+            kind: "tabs",
+            payload: stripBrowserOpenInternalMetadata(opened),
+          });
         }
         case "focus": {
           const targetId = readStringParam(params, "targetId", {
             required: true,
           });
-          if (proxyRequest) {
-            const result = await proxyRequest({
-              method: "POST",
-              path: "/tabs/focus",
-              profile,
-              body: { targetId },
-            });
-            return jsonResult(result);
-          }
-          await browserToolDeps.browserFocusTab(baseUrl, targetId, { profile });
-          return jsonResult({ ok: true });
+          const result = proxyRequest
+            ? await proxyRequest({
+                method: "POST",
+                path: "/tabs/focus",
+                profile,
+                body: { targetId },
+                timeoutMs: toolTimeoutMs,
+              })
+            : await browserToolDeps.browserFocusTab(baseUrl, targetId, {
+                profile,
+                timeoutMs: toolTimeoutMs,
+                signal,
+              });
+          sessionTabs.touch(
+            readStringValue((result as { targetId?: unknown }).targetId) ?? targetId,
+          );
+          return jsonResult(result);
         }
         case "close": {
           const targetId = readStringParam(params, "targetId");
@@ -554,27 +707,37 @@ export function createBrowserTool(opts?: {
                   method: "DELETE",
                   path: `/tabs/${encodeURIComponent(targetId)}`,
                   profile,
+                  timeoutMs: toolTimeoutMs,
                 })
               : await proxyRequest({
                   method: "POST",
                   path: "/act",
                   profile,
                   body: { kind: "close" },
+                  timeoutMs: toolTimeoutMs,
                 });
+            sessionTabs.untrack(
+              readStringValue((result as { targetId?: unknown }).targetId) ?? targetId,
+            );
             return jsonResult(result);
           }
-          if (targetId) {
-            await browserToolDeps.browserCloseTab(baseUrl, targetId, { profile });
-            browserToolDeps.untrackSessionBrowserTab({
-              sessionKey: opts?.agentSessionKey,
-              targetId,
-              baseUrl,
-              profile,
-            });
-          } else {
-            await browserToolDeps.browserAct(baseUrl, { kind: "close" }, { profile });
-          }
-          return jsonResult({ ok: true });
+          const result = targetId
+            ? await browserToolDeps.browserCloseTab(baseUrl, targetId, {
+                profile,
+                timeoutMs: toolTimeoutMs,
+                signal,
+              })
+            : await browserToolDeps.browserAct(
+                baseUrl,
+                { kind: "close" },
+                {
+                  profile,
+                  timeoutMs: toolTimeoutMs,
+                  signal,
+                },
+              );
+          sessionTabs.untrack(readStringValue(result.targetId) ?? targetId);
+          return jsonResult(result);
         }
         case "snapshot":
           return await executeSnapshotAction({
@@ -582,24 +745,31 @@ export function createBrowserTool(opts?: {
             baseUrl,
             profile,
             proxyRequest,
+            signal,
+            onTabActivity: sessionTabs.touch,
           });
         case "screenshot": {
           const targetId = readStringParam(params, "targetId");
           const fullPage = Boolean(params.fullPage);
           const ref = readStringParam(params, "ref");
           const element = readStringParam(params, "element");
+          const labels = typeof params.labels === "boolean" ? params.labels : undefined;
           const type = params.type === "jpeg" ? "jpeg" : "png";
+          const effectiveTimeoutMs = requestedTimeoutMs ?? DEFAULT_BROWSER_SCREENSHOT_TIMEOUT_MS;
           const result = proxyRequest
             ? ((await proxyRequest({
                 method: "POST",
                 path: "/screenshot",
                 profile,
+                timeoutMs: effectiveTimeoutMs,
                 body: {
                   targetId,
                   fullPage,
                   ref,
                   element,
                   type,
+                  labels,
+                  timeoutMs: effectiveTimeoutMs,
                 },
               })) as Awaited<ReturnType<typeof browserScreenshotAction>>)
             : await browserToolDeps.browserScreenshotAction(baseUrl, {
@@ -608,46 +778,200 @@ export function createBrowserTool(opts?: {
                 ref,
                 element,
                 type,
+                labels,
+                timeoutMs: effectiveTimeoutMs,
                 profile,
+                signal,
               });
+          sessionTabs.touch(readStringValue(result.targetId) ?? targetId);
+          if (opts?.screenshotResultMode === "path") {
+            const artifactPath = opts.persistScreenshot
+              ? await opts.persistScreenshot({
+                  sourcePath: result.path,
+                  type,
+                  targetId: readStringValue(result.targetId) ?? targetId,
+                })
+              : result.path;
+            if (artifactPath.length > 4_096) {
+              throw new Error("Browser screenshot artifact path exceeds 4096 characters");
+            }
+            const resultRecord = result as Record<string, unknown>;
+            const resultTargetId = readStringValue(resultRecord.targetId) ?? targetId;
+            const resultUrl = readStringValue(resultRecord.url);
+            return jsonResult({
+              ok: resultRecord.ok === true,
+              path: artifactPath,
+              ...(resultTargetId ? { targetId: truncateUtf16Safe(resultTargetId, 256) } : {}),
+              ...(resultUrl ? { url: truncateUtf16Safe(resultUrl, 2_048) } : {}),
+              ...(Array.isArray(resultRecord.annotations)
+                ? { annotationCount: resultRecord.annotations.length }
+                : {}),
+              media: { outbound: false },
+            });
+          }
+          const screenshotPath = result.path;
+          const screenshotCfg = browserToolDeps.getRuntimeConfig();
+          const imageSanitization = resolveRuntimeImageSanitization();
+          let shareHint = SCREENSHOT_SHARE_UNAVAILABLE;
+          try {
+            // The original result remains private. Only this bounded outbound
+            // copy may cross the sandbox boundary after an explicit message call.
+            const sharePath = await browserToolDeps.stageBrowserScreenshotForSharing(
+              screenshotPath,
+              imageSanitization?.maxDimensionPx,
+            );
+            shareHint = formatScreenshotShareHint(sharePath);
+          } catch {
+            // Screenshot viewing remains useful when optional outbound staging fails.
+          }
+          // Screenshots stay in the tool result for agent vision, but channel
+          // delivery must remain an explicit outbound-delivery action.
+          const screenshotDetails = {
+            ...(result as Record<string, unknown>),
+            media: { outbound: false },
+          };
+          try {
+            const described = await describeBrowserScreenshot(
+              {
+                cfg: screenshotCfg,
+                filePath: screenshotPath,
+                agentDir: opts?.agentDir,
+                agentId: opts?.agentId,
+                workspaceDir: opts?.workspaceDir,
+                activeModel: opts?.activeModel,
+                mediaScope: opts?.mediaScope,
+                imageSanitization,
+              },
+              {
+                describeImageFile: browserToolDeps.describeImageFile,
+                normalizeBrowserScreenshot: browserToolDeps.normalizeBrowserScreenshot,
+                saveMediaBuffer: browserToolDeps.saveMediaBuffer,
+              },
+            );
+            if (described) {
+              const analyzedBy =
+                described.provider && described.model
+                  ? `${described.provider}/${described.model}`
+                  : "media image understanding";
+              const headerLines = [`[analyzed by ${analyzedBy}]`];
+              // Vision model descriptions contain web page content which is
+              // untrusted external input — wrap it the same way snapshot and
+              // tabs results are wrapped to mitigate prompt injection.
+              const wrappedDescription = wrapExternalContent(
+                neutralizeMediaDirectives(described.text.trim()),
+                {
+                  source: "browser",
+                  includeWarning: true,
+                },
+              );
+              const text = `${headerLines.join("\n")}\n${wrappedDescription}\n${shareHint}`;
+              return {
+                content: [{ type: "text", text }],
+                details: {
+                  ...(result as Record<string, unknown>),
+                  // Do NOT include details.media here — the vision path returns
+                  // a text description as the deliverable output. Exposing the raw
+                  // screenshot as media would cause channel delivery to auto-send
+                  // potentially sensitive page content. The text block carries the
+                  // staged outbound-copy path for an explicit outbound-delivery send.
+                  vision: {
+                    provider: described.provider,
+                    model: described.model,
+                    decision: described.decision,
+                  },
+                },
+              };
+            }
+          } catch (err) {
+            // Fall back to returning the raw image block so the agent loop can
+            // still recover. Provider/runtime errors are untrusted page input;
+            // preserve their trust boundary and defang reply-media directives.
+            const rawReason = err instanceof Error ? err.message : String(err);
+            const reason = wrapExternalContent(neutralizeMediaDirectives(rawReason), {
+              source: "browser",
+              includeWarning: false,
+            });
+            const extraText = `[browser screenshot vision failed: ${reason}]\n${shareHint}`;
+            return await browserToolDeps.imageResultFromFile({
+              label: "browser:screenshot",
+              path: screenshotPath,
+              extraText,
+              details: screenshotDetails,
+              imageSanitization,
+            });
+          }
           return await browserToolDeps.imageResultFromFile({
             label: "browser:screenshot",
-            path: result.path,
-            details: result,
+            path: screenshotPath,
+            extraText: shareHint,
+            details: screenshotDetails,
+            imageSanitization,
           });
         }
         case "navigate": {
           const targetUrl = readTargetUrlParam(params);
           const targetId = readStringParam(params, "targetId");
-          if (proxyRequest) {
-            const result = await proxyRequest({
-              method: "POST",
-              path: "/navigate",
-              profile,
-              body: {
+          const timeoutMs =
+            requestedTimeoutMs === undefined
+              ? undefined
+              : resolveBrowserNavigationTimeoutMs(requestedTimeoutMs);
+          const result = proxyRequest
+            ? await proxyRequest({
+                method: "POST",
+                path: "/navigate",
+                profile,
+                body: {
+                  url: targetUrl,
+                  targetId,
+                  timeoutMs,
+                },
+                timeoutMs,
+              })
+            : await browserToolDeps.browserNavigate(baseUrl, {
                 url: targetUrl,
                 targetId,
-              },
-            });
-            return jsonResult(result);
+                timeoutMs,
+                profile,
+                signal,
+              });
+          const navigatedTargetId =
+            readStringValue((result as { targetId?: unknown }).targetId) ?? targetId;
+          sessionTabs.touch(navigatedTargetId);
+          const formatted = formatBrowserExternalToolResult({
+            kind: (result as { download?: unknown }).download ? "download" : "act",
+            payload: result,
+          });
+          // A navigation that resolved to a download leaves the document
+          // unchanged, so inline page state would describe the wrong thing.
+          if ((result as { download?: unknown }).download) {
+            return formatted;
           }
-          return jsonResult(
-            await browserToolDeps.browserNavigate(baseUrl, {
-              url: targetUrl,
-              targetId,
-              profile,
-            }),
-          );
+          return await appendNavigatedPageState({
+            result: formatted,
+            targetId: navigatedTargetId,
+            baseUrl,
+            profile,
+            proxyRequest,
+            signal,
+          });
         }
-        case "console":
-          return await executeConsoleAction({
+        case "console": {
+          const result = await executeConsoleAction({
             input: params,
             baseUrl,
             profile,
             proxyRequest,
+            signal,
           });
+          const targetId = readStringParam(params, "targetId");
+          const canonicalTargetId = readStringValue(
+            (result.details as { targetId?: unknown } | undefined)?.targetId,
+          );
+          sessionTabs.touch(canonicalTargetId ?? targetId);
+          return result;
+        }
         case "pdf": {
-          const targetId = typeof params.targetId === "string" ? params.targetId.trim() : undefined;
+          const targetId = normalizeOptionalString(params.targetId);
           const result = proxyRequest
             ? ((await proxyRequest({
                 method: "POST",
@@ -655,84 +979,64 @@ export function createBrowserTool(opts?: {
                 profile,
                 body: { targetId },
               })) as Awaited<ReturnType<typeof browserPdfSave>>)
-            : await browserToolDeps.browserPdfSave(baseUrl, { targetId, profile });
+            : await browserToolDeps.browserPdfSave(baseUrl, { targetId, profile, signal });
+          sessionTabs.touch(readStringValue(result.targetId) ?? targetId);
           return {
             content: [{ type: "text" as const, text: `FILE:${result.path}` }],
             details: result,
           };
         }
+        case "download":
+        case "waitfordownload":
+          return await executeDownloadAction({
+            action,
+            input: params,
+            baseUrl,
+            profile,
+            proxyRequest,
+            signal,
+            onTabActivity: sessionTabs.touch,
+          });
         case "upload": {
           const paths = Array.isArray(params.paths) ? params.paths.map((p) => String(p)) : [];
           if (paths.length === 0) {
             throw new Error("paths required");
           }
-          const uploadPathsResult = await resolveExistingPathsWithinRoot({
-            rootDir: DEFAULT_UPLOAD_DIR,
-            requestedPaths: paths,
-            scopeLabel: `uploads directory (${DEFAULT_UPLOAD_DIR})`,
-          });
-          if (!uploadPathsResult.ok) {
-            throw new Error(uploadPathsResult.error);
+          const resolvedResult = await resolveExistingUploadPaths({ requestedPaths: paths });
+          if (!resolvedResult.ok) {
+            throw new Error(resolvedResult.error);
           }
-          const normalizedPaths = uploadPathsResult.paths;
+          const normalizedPaths = resolvedResult.paths;
           const ref = readStringParam(params, "ref");
           const inputRef = readStringParam(params, "inputRef");
           const element = readStringParam(params, "element");
           const { targetId, timeoutMs } = readOptionalTargetAndTimeout(params);
-          if (proxyRequest) {
-            const result = await proxyRequest({
-              method: "POST",
-              path: "/hooks/file-chooser",
-              profile,
-              body: {
-                paths: normalizedPaths,
-                ref,
-                inputRef,
-                element,
-                targetId,
-                timeoutMs,
-              },
-            });
-            return jsonResult(result);
-          }
-          return jsonResult(
-            await browserToolDeps.browserArmFileChooser(baseUrl, {
-              paths: normalizedPaths,
-              ref,
-              inputRef,
-              element,
-              targetId,
-              timeoutMs,
-              profile,
-            }),
+          const request = {
+            paths: normalizedPaths,
+            ref,
+            inputRef,
+            element,
+            targetId,
+            timeoutMs,
+          };
+          return await executeTrackedTabRequest(
+            "/hooks/file-chooser",
+            request,
+            async () =>
+              await browserToolDeps.browserArmFileChooser(baseUrl, { ...request, profile, signal }),
           );
         }
         case "dialog": {
           const accept = Boolean(params.accept);
-          const promptText = typeof params.promptText === "string" ? params.promptText : undefined;
+          const promptText = readStringValue(params.promptText);
+          const dialogId = readStringValue(params.dialogId);
           const { targetId, timeoutMs } = readOptionalTargetAndTimeout(params);
-          if (proxyRequest) {
-            const result = await proxyRequest({
-              method: "POST",
-              path: "/hooks/dialog",
-              profile,
-              body: {
-                accept,
-                promptText,
-                targetId,
-                timeoutMs,
-              },
-            });
-            return jsonResult(result);
-          }
-          return jsonResult(
-            await browserToolDeps.browserArmDialog(baseUrl, {
-              accept,
-              promptText,
-              targetId,
-              timeoutMs,
-              profile,
-            }),
+          const request = { accept, promptText, dialogId, targetId, timeoutMs };
+          return await executeTrackedTabRequest(
+            "/hooks/dialog",
+            request,
+            async () =>
+              await browserToolDeps.browserArmDialog(baseUrl, { ...request, profile, signal }),
           );
         }
         case "act": {
@@ -740,11 +1044,20 @@ export function createBrowserTool(opts?: {
           if (!request) {
             throw new Error("request required");
           }
+          if (!capabilities.actKinds.some((kind) => kind === request.kind)) {
+            throw new Error(
+              `browser act kind ${JSON.stringify(request.kind)} is unavailable for this run`,
+            );
+          }
           return await executeActAction({
             request,
             baseUrl,
             profile,
+            usesChromeMcp: isUserBrowserProfile,
             proxyRequest,
+            signal,
+            onTabActivity: sessionTabs.touch,
+            onTabClose: sessionTabs.untrack,
           });
         }
         default:
@@ -753,3 +1066,4 @@ export function createBrowserTool(opts?: {
     },
   };
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

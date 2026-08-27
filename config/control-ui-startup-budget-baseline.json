@@ -1,0 +1,5 @@
+{
+  "startupJsGzipBytes": 344044,
+  "reason": "mobile drawer modal ownership and breakpoint-gated swipe loader; measured 344044 B with desktop request and modal regression coverage",
+  "updatedAt": "2026-08-27"
+}

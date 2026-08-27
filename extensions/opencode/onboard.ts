@@ -1,11 +1,7 @@
-import { OPENCODE_ZEN_DEFAULT_MODEL_REF } from "openclaw/plugin-sdk/provider-models";
-import {
-  applyAgentDefaultModelPrimary,
-  withAgentModelAliases,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk/provider-onboard";
+// Opencode setup module handles plugin onboarding behavior.
+import { withAgentModelAliases, type OpenClawConfig } from "openclaw/plugin-sdk/provider-onboard";
 
-export { OPENCODE_ZEN_DEFAULT_MODEL_REF };
+export const OPENCODE_ZEN_DEFAULT_MODEL_REF = "opencode/claude-opus-5";
 
 export function applyOpencodeZenProviderConfig(cfg: OpenClawConfig): OpenClawConfig {
   return {
@@ -20,11 +16,4 @@ export function applyOpencodeZenProviderConfig(cfg: OpenClawConfig): OpenClawCon
       },
     },
   };
-}
-
-export function applyOpencodeZenConfig(cfg: OpenClawConfig): OpenClawConfig {
-  return applyAgentDefaultModelPrimary(
-    applyOpencodeZenProviderConfig(cfg),
-    OPENCODE_ZEN_DEFAULT_MODEL_REF,
-  );
 }

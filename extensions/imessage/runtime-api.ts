@@ -1,20 +1,24 @@
+// Imessage API module exposes the plugin public contract.
+import type { OpenClawConfig as RuntimeApiOpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+
 export {
   DEFAULT_ACCOUNT_ID,
-  PAIRING_APPROVED_MESSAGE,
-  buildComputedAccountStatusSnapshot,
-  buildChannelConfigSchema,
-  collectStatusIssuesFromLastError,
-  formatTrimmedAllowFromEntries,
   getChatChannelMeta,
-  looksLikeIMessageTargetId,
-  normalizeIMessageMessagingTarget,
-  resolveChannelMediaMaxBytes,
+  type ChannelPlugin,
+} from "openclaw/plugin-sdk/core";
+export { buildChannelConfigSchema, IMessageConfigSchema } from "./config-api.js";
+export { PAIRING_APPROVED_MESSAGE } from "openclaw/plugin-sdk/channel-status";
+export {
+  buildComputedAccountStatusSnapshot,
+  collectStatusIssuesFromLastError,
+} from "openclaw/plugin-sdk/status-helpers";
+export { formatTrimmedAllowFromEntries } from "openclaw/plugin-sdk/channel-config-helpers";
+export {
   resolveIMessageConfigAllowFrom,
   resolveIMessageConfigDefaultTo,
-  IMessageConfigSchema,
-  type ChannelPlugin,
-  type IMessageAccountConfig,
-} from "openclaw/plugin-sdk/imessage";
+} from "./src/config-accessors.js";
+export { looksLikeIMessageTargetId, normalizeIMessageMessagingTarget } from "./src/normalize.js";
+export { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/media-runtime";
 export {
   resolveIMessageGroupRequireMention,
   resolveIMessageGroupToolPolicy,
@@ -22,7 +26,13 @@ export {
 
 export { monitorIMessageProvider } from "./src/monitor.js";
 export type { MonitorIMessageOpts } from "./src/monitor.js";
-export { __testing as imessageMonitorTesting } from "./src/monitor/monitor-provider.js";
-export { imessageOutbound } from "./src/outbound-adapter.js";
 export { probeIMessage } from "./src/probe.js";
+export type { IMessageProbe } from "./src/probe.js";
 export { sendMessageIMessage } from "./src/send.js";
+export { imessageMessageActions } from "./src/actions.js";
+export { setIMessageRuntime } from "./src/runtime.js";
+export { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
+export type IMessageAccountConfig = Omit<
+  NonNullable<NonNullable<RuntimeApiOpenClawConfig["channels"]>["imessage"]>,
+  "accounts" | "defaultAccount"
+>;

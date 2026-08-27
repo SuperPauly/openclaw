@@ -1,404 +1,318 @@
+// Registry contract tests cover plugin contract registry contents and lookup behavior.
+import { sortUniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { describe, expect, it } from "vitest";
-import { resolveBundledWebSearchPluginIds } from "../bundled-web-search.js";
-import { loadPluginManifestRegistry } from "../manifest-registry.js";
-import {
-  imageGenerationProviderContractRegistry,
-  mediaUnderstandingProviderContractRegistry,
-  pluginRegistrationContractRegistry,
-  providerContractLoadError,
-  providerContractPluginIds,
-  speechProviderContractRegistry,
-} from "./registry.js";
+import { loadPluginManifestRegistryCore, type PluginManifestRecord } from "../manifest-registry.js";
+import { resolveManifestContractPluginIds } from "../plugin-registry.js";
+import { BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS } from "./inventory/bundled-capability-metadata.js";
+import { pluginRegistrationContractRegistry, providerContractLoadError } from "./registry.js";
 
-const REGISTRY_CONTRACT_TIMEOUT_MS = 300_000;
-
-function findProviderIdsForPlugin(pluginId: string) {
-  return (
-    pluginRegistrationContractRegistry.find((entry) => entry.pluginId === pluginId)?.providerIds ??
-    []
-  );
-}
-
-function findWebSearchIdsForPlugin(pluginId: string) {
-  return (
-    pluginRegistrationContractRegistry.find((entry) => entry.pluginId === pluginId)
-      ?.webSearchProviderIds ?? []
-  );
-}
-
-function findSpeechProviderIdsForPlugin(pluginId: string) {
-  return speechProviderContractRegistry
-    .filter((entry) => entry.pluginId === pluginId)
-    .map((entry) => entry.provider.id)
-    .toSorted((left, right) => left.localeCompare(right));
-}
-
-function findSpeechProviderForPlugin(pluginId: string) {
-  const entry = speechProviderContractRegistry.find((candidate) => candidate.pluginId === pluginId);
-  if (!entry) {
-    throw new Error(`speech provider contract missing for ${pluginId}`);
-  }
-  return entry.provider;
-}
-
-function findMediaUnderstandingProviderIdsForPlugin(pluginId: string) {
-  return mediaUnderstandingProviderContractRegistry
-    .filter((entry) => entry.pluginId === pluginId)
-    .map((entry) => entry.provider.id)
-    .toSorted((left, right) => left.localeCompare(right));
-}
-
-function findMediaUnderstandingProviderForPlugin(pluginId: string) {
-  const entry = mediaUnderstandingProviderContractRegistry.find(
-    (candidate) => candidate.pluginId === pluginId,
-  );
-  if (!entry) {
-    throw new Error(`media-understanding provider contract missing for ${pluginId}`);
-  }
-  return entry.provider;
-}
-
-function findImageGenerationProviderIdsForPlugin(pluginId: string) {
-  return imageGenerationProviderContractRegistry
-    .filter((entry) => entry.pluginId === pluginId)
-    .map((entry) => entry.provider.id)
-    .toSorted((left, right) => left.localeCompare(right));
-}
-
-function findImageGenerationProviderForPlugin(pluginId: string) {
-  const entry = imageGenerationProviderContractRegistry.find(
-    (candidate) => candidate.pluginId === pluginId,
-  );
-  if (!entry) {
-    throw new Error(`image-generation provider contract missing for ${pluginId}`);
-  }
-  return entry.provider;
-}
-
-function findRegistrationForPlugin(pluginId: string) {
-  const entry = pluginRegistrationContractRegistry.find(
-    (candidate) => candidate.pluginId === pluginId,
-  );
-  if (!entry) {
-    throw new Error(`plugin registration contract missing for ${pluginId}`);
-  }
-  return entry;
-}
-
-type BundledCapabilityContractKey =
-  | "speechProviders"
-  | "mediaUnderstandingProviders"
-  | "imageGenerationProviders";
-
-function findBundledManifestPluginIdsForContract(key: BundledCapabilityContractKey) {
-  return loadPluginManifestRegistry({})
-    .plugins.filter(
-      (plugin) => plugin.origin === "bundled" && (plugin.contracts?.[key]?.length ?? 0) > 0,
-    )
-    .map((plugin) => plugin.id)
-    .toSorted((left, right) => left.localeCompare(right));
-}
+const ACTIVATION_SCOPED_WEB_SEARCH_PLUGIN_IDS = ["codex", "qa-lab"] as const;
+const ACTIVATION_SCOPED_WEB_SEARCH_PLUGIN_ID_SET = new Set<string>(
+  ACTIVATION_SCOPED_WEB_SEARCH_PLUGIN_IDS,
+);
 
 describe("plugin contract registry", () => {
-  it("loads bundled non-provider capability registries without import-time failure", () => {
-    expect(providerContractLoadError).toBeUndefined();
-    expect(pluginRegistrationContractRegistry.length).toBeGreaterThan(0);
-  });
-
-  it("does not duplicate bundled provider ids", () => {
-    const ids = pluginRegistrationContractRegistry.flatMap((entry) => entry.providerIds);
+  function expectUniqueIds(ids: readonly string[]) {
     expect(ids).toEqual([...new Set(ids)]);
-  });
+  }
 
-  it("does not duplicate bundled web search provider ids", () => {
-    const ids = pluginRegistrationContractRegistry.flatMap((entry) => entry.webSearchProviderIds);
-    expect(ids).toEqual([...new Set(ids)]);
-  });
+  function expectRegistryPluginIds(params: {
+    actualPluginIds: readonly string[];
+    predicate: (plugin: PluginManifestRecord) => boolean;
+  }) {
+    expect(sortUniqueStrings(params.actualPluginIds)).toEqual(
+      resolveBundledManifestPluginIds(params.predicate),
+    );
+  }
 
-  it(
-    "does not duplicate bundled speech provider ids",
-    { timeout: REGISTRY_CONTRACT_TIMEOUT_MS },
-    () => {
-      const ids = speechProviderContractRegistry.map((entry) => entry.provider.id);
-      expect(ids).toEqual([...new Set(ids)]);
-    },
-  );
-
-  it("does not duplicate bundled media provider ids", () => {
-    const ids = mediaUnderstandingProviderContractRegistry.map((entry) => entry.provider.id);
-    expect(ids).toEqual([...new Set(ids)]);
-  });
-
-  it("covers every bundled provider plugin discovered from manifests", () => {
-    const bundledProviderPluginIds = loadPluginManifestRegistry({})
-      .plugins.filter((plugin) => plugin.origin === "bundled" && plugin.providers.length > 0)
+  function resolveBundledManifestPluginIds(predicate: (plugin: PluginManifestRecord) => boolean) {
+    if (process.env.VITEST) {
+      return BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS.map(
+        (entry) =>
+          ({
+            id: entry.pluginId,
+            origin: "bundled",
+            providers: entry.providerIds,
+            contracts: {
+              embeddingProviders: entry.embeddingProviderIds,
+              workerProviders: entry.workerProviderIds,
+              speechProviders: entry.speechProviderIds,
+              realtimeTranscriptionProviders: entry.realtimeTranscriptionProviderIds,
+              realtimeVoiceProviders: entry.realtimeVoiceProviderIds,
+              mediaUnderstandingProviders: entry.mediaUnderstandingProviderIds,
+              transcriptSourceProviders: entry.transcriptSourceProviderIds,
+              documentExtractors: entry.documentExtractorIds,
+              imageGenerationProviders: entry.imageGenerationProviderIds,
+              videoGenerationProviders: entry.videoGenerationProviderIds,
+              musicGenerationProviders: entry.musicGenerationProviderIds,
+              webContentExtractors: entry.webContentExtractorIds,
+              webFetchProviders: entry.webFetchProviderIds,
+              webSearchProviders: entry.webSearchProviderIds,
+              migrationProviders: entry.migrationProviderIds,
+              tools: entry.toolNames,
+            },
+          }) as PluginManifestRecord,
+      )
+        .filter(predicate)
+        .map((plugin) => plugin.id)
+        .toSorted((left, right) => left.localeCompare(right));
+    }
+    const snapshotPluginIds = new Set(
+      BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS.map((entry) => entry.pluginId),
+    );
+    return loadPluginManifestRegistryCore({})
+      .plugins.filter((plugin) => snapshotPluginIds.has(plugin.id) && predicate(plugin))
       .map((plugin) => plugin.id)
       .toSorted((left, right) => left.localeCompare(right));
+  }
 
-    expect(providerContractPluginIds).toEqual(bundledProviderPluginIds);
+  it("loads bundled non-provider capability registries without import-time failure", () => {
+    expect(providerContractLoadError).toBeUndefined();
+    expect(Array.from(pluginRegistrationContractRegistry)).toStrictEqual(
+      BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS,
+    );
+  });
+
+  it.each([
+    {
+      name: "does not duplicate bundled provider ids",
+      ids: () => pluginRegistrationContractRegistry.flatMap((entry) => entry.providerIds),
+    },
+    {
+      name: "does not duplicate bundled worker provider ids",
+      ids: () => pluginRegistrationContractRegistry.flatMap((entry) => entry.workerProviderIds),
+    },
+    {
+      name: "does not duplicate bundled web fetch provider ids",
+      ids: () => pluginRegistrationContractRegistry.flatMap((entry) => entry.webFetchProviderIds),
+    },
+    {
+      name: "does not duplicate bundled web search provider ids",
+      ids: () => pluginRegistrationContractRegistry.flatMap((entry) => entry.webSearchProviderIds),
+    },
+    {
+      name: "does not duplicate bundled migration provider ids",
+      ids: () => pluginRegistrationContractRegistry.flatMap((entry) => entry.migrationProviderIds),
+    },
+    {
+      name: "does not duplicate bundled media provider ids",
+      ids: () =>
+        pluginRegistrationContractRegistry.flatMap((entry) => entry.mediaUnderstandingProviderIds),
+    },
+    {
+      name: "does not duplicate bundled transcripts source provider ids",
+      ids: () =>
+        pluginRegistrationContractRegistry.flatMap((entry) => entry.transcriptSourceProviderIds),
+    },
+    {
+      name: "does not duplicate bundled realtime transcription provider ids",
+      ids: () =>
+        pluginRegistrationContractRegistry.flatMap(
+          (entry) => entry.realtimeTranscriptionProviderIds,
+        ),
+    },
+    {
+      name: "does not duplicate bundled realtime voice provider ids",
+      ids: () =>
+        pluginRegistrationContractRegistry.flatMap((entry) => entry.realtimeVoiceProviderIds),
+    },
+    {
+      name: "does not duplicate bundled image-generation provider ids",
+      ids: () =>
+        pluginRegistrationContractRegistry.flatMap((entry) => entry.imageGenerationProviderIds),
+    },
+  ] as const)("$name", ({ ids }) => {
+    expectUniqueIds(ids());
+  });
+
+  it("does not duplicate bundled speech provider ids", () => {
+    expectUniqueIds(pluginRegistrationContractRegistry.flatMap((entry) => entry.speechProviderIds));
+  });
+
+  it.each([
+    ["azure-speech", "speechProviderIds", ["azure-speech", "azure"]],
+    ["microsoft", "speechProviderIds", ["microsoft", "edge"]],
+    ["tts-local-cli", "speechProviderIds", ["tts-local-cli", "cli"]],
+    ["volcengine", "speechProviderIds", ["volcengine", "bytedance", "doubao"]],
+    ["xiaomi", "speechProviderIds", ["xiaomi", "mimo"]],
+    ["xai", "realtimeVoiceProviderIds", ["xai", "grok-voice", "xai-realtime-voice"]],
+  ] as const)("declares canonical-first %s %s aliases", (pluginId, contract, providerIds) => {
+    expect(
+      pluginRegistrationContractRegistry.find((entry) => entry.pluginId === pluginId)?.[contract],
+    ).toEqual(providerIds);
+  });
+
+  it("covers every bundled worker provider plugin discovered from manifests", () => {
+    expectRegistryPluginIds({
+      actualPluginIds: pluginRegistrationContractRegistry
+        .filter((entry) => entry.workerProviderIds.length > 0)
+        .map((entry) => entry.pluginId),
+      predicate: (plugin) =>
+        plugin.origin === "bundled" && (plugin.contracts?.workerProviders?.length ?? 0) > 0,
+    });
+  });
+
+  it("keeps video-only provider auth choices out of text onboarding", () => {
+    const registry = loadPluginManifestRegistryCore({});
+
+    for (const pluginId of ["alibaba", "runway"]) {
+      const plugin = registry.plugins.find(
+        (entry) => entry.origin === "bundled" && entry.id === pluginId,
+      );
+      expect(plugin?.providerAuthChoices).toEqual([
+        {
+          provider: pluginId,
+          method: "api-key",
+          choiceId: pluginId === "alibaba" ? "alibaba-model-studio-api-key" : "runway-api-key",
+          choiceLabel: pluginId === "alibaba" ? "Alibaba Model Studio API key" : "Runway API key",
+          groupId: pluginId,
+          groupLabel: pluginId === "alibaba" ? "Alibaba Model Studio" : "Runway",
+          groupHint: pluginId === "alibaba" ? "DashScope / Model Studio API key" : "API key",
+          onboardingScopes: ["image-generation"],
+          optionKey: pluginId === "alibaba" ? "alibabaModelStudioApiKey" : "runwayApiKey",
+          cliFlag: pluginId === "alibaba" ? "--alibaba-model-studio-api-key" : "--runway-api-key",
+          cliOption:
+            pluginId === "alibaba"
+              ? "--alibaba-model-studio-api-key <key>"
+              : "--runway-api-key <key>",
+          cliDescription:
+            pluginId === "alibaba" ? "Alibaba Model Studio API key" : "Runway API key",
+        },
+      ]);
+    }
+  });
+
+  it("exposes the GitHub Copilot non-interactive onboarding token flag from manifest metadata", () => {
+    const registry = loadPluginManifestRegistryCore({});
+    const plugin = registry.plugins.find(
+      (entry) => entry.origin === "bundled" && entry.id === "github-copilot",
+    );
+
+    expect(plugin?.providerAuthChoices).toEqual([
+      {
+        provider: "github-copilot",
+        method: "device",
+        appGuidedAuth: "device-code",
+        appGuidedSecret: true,
+        choiceId: "github-copilot",
+        choiceLabel: "GitHub Copilot",
+        choiceHint: "Device login with your GitHub account",
+        assistantPriority: 1,
+        groupId: "copilot",
+        groupLabel: "Copilot",
+        groupHint: "GitHub, GitHub Enterprise + Local Proxy",
+        optionKey: "githubCopilotToken",
+        cliFlag: "--github-copilot-token",
+        cliOption: "--github-copilot-token <token>",
+        cliDescription: "GitHub Copilot OAuth token",
+      },
+      {
+        provider: "github-copilot",
+        method: "device-enterprise",
+        appGuidedAuth: "device-code",
+        choiceId: "github-copilot-enterprise",
+        choiceLabel: "GitHub Copilot (Enterprise / data residency)",
+        choiceHint: "Device login against your GitHub Enterprise (*.ghe.com) tenant",
+        assistantPriority: 2,
+        groupId: "copilot",
+        groupLabel: "Copilot",
+        groupHint: "GitHub, GitHub Enterprise + Local Proxy",
+      },
+    ]);
   });
 
   it("covers every bundled speech plugin discovered from manifests", () => {
-    const bundledSpeechPluginIds = findBundledManifestPluginIdsForContract("speechProviders");
-
-    expect(
-      [...new Set(speechProviderContractRegistry.map((entry) => entry.pluginId))].toSorted(
-        (left, right) => left.localeCompare(right),
-      ),
-    ).toEqual(bundledSpeechPluginIds);
+    expectRegistryPluginIds({
+      actualPluginIds: pluginRegistrationContractRegistry
+        .filter((entry) => entry.speechProviderIds.length > 0)
+        .map((entry) => entry.pluginId),
+      predicate: (plugin) =>
+        plugin.origin === "bundled" && (plugin.contracts?.speechProviders?.length ?? 0) > 0,
+    });
   });
 
-  it("covers every bundled media-understanding plugin discovered from manifests", () => {
-    const bundledMediaPluginIds = findBundledManifestPluginIdsForContract(
-      "mediaUnderstandingProviders",
-    );
-
-    expect(
-      [
-        ...new Set(mediaUnderstandingProviderContractRegistry.map((entry) => entry.pluginId)),
-      ].toSorted((left, right) => left.localeCompare(right)),
-    ).toEqual(bundledMediaPluginIds);
+  it("covers every bundled realtime voice plugin discovered from manifests", () => {
+    expectRegistryPluginIds({
+      actualPluginIds: pluginRegistrationContractRegistry
+        .filter((entry) => entry.realtimeVoiceProviderIds.length > 0)
+        .map((entry) => entry.pluginId),
+      predicate: (plugin) =>
+        plugin.origin === "bundled" && (plugin.contracts?.realtimeVoiceProviders?.length ?? 0) > 0,
+    });
   });
 
-  it("covers every bundled image-generation plugin discovered from manifests", () => {
-    const bundledImagePluginIds = findBundledManifestPluginIdsForContract(
-      "imageGenerationProviders",
-    );
+  it("covers every bundled realtime transcription plugin discovered from manifests", () => {
+    expectRegistryPluginIds({
+      actualPluginIds: pluginRegistrationContractRegistry
+        .filter((entry) => entry.realtimeTranscriptionProviderIds.length > 0)
+        .map((entry) => entry.pluginId),
+      predicate: (plugin) =>
+        plugin.origin === "bundled" &&
+        (plugin.contracts?.realtimeTranscriptionProviders?.length ?? 0) > 0,
+    });
+  });
+
+  it("covers every bundled transcripts source plugin discovered from manifests", () => {
+    expectRegistryPluginIds({
+      actualPluginIds: pluginRegistrationContractRegistry
+        .filter((entry) => entry.transcriptSourceProviderIds.length > 0)
+        .map((entry) => entry.pluginId),
+      predicate: (plugin) =>
+        plugin.origin === "bundled" &&
+        (plugin.contracts?.transcriptSourceProviders?.length ?? 0) > 0,
+    });
+  });
+
+  it("covers every bundled web fetch plugin from the shared resolver", () => {
+    const bundledWebFetchPluginIds = resolveManifestContractPluginIds({
+      contract: "webFetchProviders",
+      origin: "bundled",
+    });
 
     expect(
-      [...new Set(imageGenerationProviderContractRegistry.map((entry) => entry.pluginId))].toSorted(
-        (left, right) => left.localeCompare(right),
+      sortUniqueStrings(
+        pluginRegistrationContractRegistry
+          .filter((entry) => entry.webFetchProviderIds.length > 0)
+          .map((entry) => entry.pluginId),
       ),
-    ).toEqual(bundledImagePluginIds);
+    ).toEqual(bundledWebFetchPluginIds);
   });
 
   it("covers every bundled web search plugin from the shared resolver", () => {
-    const bundledWebSearchPluginIds = resolveBundledWebSearchPluginIds({});
-
-    expect(
+    const snapshotPluginIds = new Set(
+      BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS.map((entry) => entry.pluginId),
+    );
+    const bundledWebSearchPluginIds = resolveManifestContractPluginIds({
+      contract: "webSearchProviders",
+      origin: "bundled",
+    }).filter(
+      (pluginId) =>
+        snapshotPluginIds.has(pluginId) &&
+        !ACTIVATION_SCOPED_WEB_SEARCH_PLUGIN_ID_SET.has(pluginId),
+    );
+    const expectedPluginIds = sortUniqueStrings([
+      ...bundledWebSearchPluginIds,
+      ...ACTIVATION_SCOPED_WEB_SEARCH_PLUGIN_IDS,
+    ]);
+    const actualPluginIds = sortUniqueStrings(
       pluginRegistrationContractRegistry
         .filter((entry) => entry.webSearchProviderIds.length > 0)
-        .map((entry) => entry.pluginId)
-        .toSorted((left, right) => left.localeCompare(right)),
-    ).toEqual(bundledWebSearchPluginIds);
-  });
-
-  it("keeps Kimi Coding onboarding grouped under Moonshot", () => {
-    const kimi = loadPluginManifestRegistry({}).plugins.find(
-      (plugin) => plugin.origin === "bundled" && plugin.id === "kimi",
+        .map((entry) => entry.pluginId),
     );
 
-    expect(kimi?.providerAuthChoices).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          choiceId: "kimi-code-api-key",
-          choiceLabel: "Kimi Code API key (subscription)",
-          groupId: "moonshot",
-          groupLabel: "Moonshot AI (Kimi K2.5)",
-          groupHint: "Kimi K2.5",
-        }),
-      ]),
-    );
-  });
-
-  it("does not duplicate bundled image-generation provider ids", () => {
-    const ids = imageGenerationProviderContractRegistry.map((entry) => entry.provider.id);
-    expect(ids).toEqual([...new Set(ids)]);
-  });
-  it("keeps multi-provider plugin ownership explicit", () => {
-    expect(findProviderIdsForPlugin("google")).toEqual(["google", "google-gemini-cli"]);
-    expect(findProviderIdsForPlugin("minimax")).toEqual(["minimax", "minimax-portal"]);
-    expect(findProviderIdsForPlugin("openai")).toEqual(["openai", "openai-codex"]);
-  });
-
-  it("keeps bundled web search ownership explicit", () => {
-    expect(findWebSearchIdsForPlugin("brave")).toEqual(["brave"]);
-    expect(findWebSearchIdsForPlugin("duckduckgo")).toEqual(["duckduckgo"]);
-    expect(findWebSearchIdsForPlugin("exa")).toEqual(["exa"]);
-    expect(findWebSearchIdsForPlugin("firecrawl")).toEqual(["firecrawl"]);
-    expect(findWebSearchIdsForPlugin("google")).toEqual(["gemini"]);
-    expect(findWebSearchIdsForPlugin("moonshot")).toEqual(["kimi"]);
-    expect(findWebSearchIdsForPlugin("perplexity")).toEqual(["perplexity"]);
-    expect(findWebSearchIdsForPlugin("tavily")).toEqual(["tavily"]);
-    expect(findWebSearchIdsForPlugin("xai")).toEqual(["grok"]);
-  });
-
-  it("keeps bundled speech ownership explicit", () => {
-    expect(findSpeechProviderIdsForPlugin("elevenlabs")).toEqual(["elevenlabs"]);
-    expect(findSpeechProviderIdsForPlugin("microsoft")).toEqual(["microsoft"]);
-    expect(findSpeechProviderIdsForPlugin("openai")).toEqual(["openai"]);
-  });
-
-  it("keeps bundled media-understanding ownership explicit", () => {
-    expect(findMediaUnderstandingProviderIdsForPlugin("anthropic")).toEqual(["anthropic"]);
-    expect(findMediaUnderstandingProviderIdsForPlugin("google")).toEqual(["google"]);
-    expect(findMediaUnderstandingProviderIdsForPlugin("minimax")).toEqual([
-      "minimax",
-      "minimax-portal",
-    ]);
-    expect(findMediaUnderstandingProviderIdsForPlugin("mistral")).toEqual(["mistral"]);
-    expect(findMediaUnderstandingProviderIdsForPlugin("moonshot")).toEqual(["moonshot"]);
-    expect(findMediaUnderstandingProviderIdsForPlugin("openai")).toEqual([
-      "openai",
-      "openai-codex",
-    ]);
-    expect(findMediaUnderstandingProviderIdsForPlugin("zai")).toEqual(["zai"]);
-  });
-
-  it("keeps bundled image-generation ownership explicit", () => {
-    expect(findImageGenerationProviderIdsForPlugin("fal")).toEqual(["fal"]);
-    expect(findImageGenerationProviderIdsForPlugin("google")).toEqual(["google"]);
-    expect(findImageGenerationProviderIdsForPlugin("minimax")).toEqual([
-      "minimax",
-      "minimax-portal",
-    ]);
-    expect(findImageGenerationProviderIdsForPlugin("openai")).toEqual(["openai"]);
-  });
-
-  it("keeps bundled provider and web search tool ownership explicit", () => {
-    expect(findRegistrationForPlugin("exa")).toMatchObject({
-      cliBackendIds: [],
-      providerIds: [],
-      speechProviderIds: [],
-      mediaUnderstandingProviderIds: [],
-      imageGenerationProviderIds: [],
-      webSearchProviderIds: ["exa"],
-      toolNames: [],
-    });
-    expect(findRegistrationForPlugin("firecrawl")).toMatchObject({
-      cliBackendIds: [],
-      providerIds: [],
-      speechProviderIds: [],
-      mediaUnderstandingProviderIds: [],
-      imageGenerationProviderIds: [],
-      webSearchProviderIds: ["firecrawl"],
-      toolNames: ["firecrawl_search", "firecrawl_scrape"],
-    });
-    expect(findRegistrationForPlugin("tavily")).toMatchObject({
-      cliBackendIds: [],
-      providerIds: [],
-      speechProviderIds: [],
-      mediaUnderstandingProviderIds: [],
-      imageGenerationProviderIds: [],
-      webSearchProviderIds: ["tavily"],
-      toolNames: ["tavily_search", "tavily_extract"],
-    });
-  });
-
-  it("tracks speech registrations on bundled provider plugins", () => {
-    expect(findRegistrationForPlugin("fal")).toMatchObject({
-      cliBackendIds: [],
-      providerIds: ["fal"],
-      speechProviderIds: [],
-      mediaUnderstandingProviderIds: [],
-      imageGenerationProviderIds: ["fal"],
-      webSearchProviderIds: [],
-    });
-    expect(findRegistrationForPlugin("anthropic")).toMatchObject({
-      cliBackendIds: ["claude-cli"],
-      providerIds: ["anthropic"],
-      speechProviderIds: [],
-      mediaUnderstandingProviderIds: ["anthropic"],
-      imageGenerationProviderIds: [],
-      webSearchProviderIds: [],
-    });
-    expect(findRegistrationForPlugin("google")).toMatchObject({
-      cliBackendIds: ["google-gemini-cli"],
-      providerIds: ["google", "google-gemini-cli"],
-      speechProviderIds: [],
-      mediaUnderstandingProviderIds: ["google"],
-      imageGenerationProviderIds: ["google"],
-      webSearchProviderIds: ["gemini"],
-    });
-    expect(findRegistrationForPlugin("openai")).toMatchObject({
-      cliBackendIds: ["codex-cli"],
-      providerIds: ["openai", "openai-codex"],
-      speechProviderIds: ["openai"],
-      mediaUnderstandingProviderIds: ["openai", "openai-codex"],
-      imageGenerationProviderIds: ["openai"],
-    });
-    expect(findRegistrationForPlugin("minimax")).toMatchObject({
-      cliBackendIds: [],
-      providerIds: ["minimax", "minimax-portal"],
-      speechProviderIds: [],
-      mediaUnderstandingProviderIds: ["minimax", "minimax-portal"],
-      imageGenerationProviderIds: ["minimax", "minimax-portal"],
-      webSearchProviderIds: [],
-    });
-    expect(findRegistrationForPlugin("elevenlabs")).toMatchObject({
-      cliBackendIds: [],
-      providerIds: [],
-      speechProviderIds: ["elevenlabs"],
-      mediaUnderstandingProviderIds: [],
-      imageGenerationProviderIds: [],
-    });
-    expect(findRegistrationForPlugin("microsoft")).toMatchObject({
-      cliBackendIds: [],
-      providerIds: [],
-      speechProviderIds: ["microsoft"],
-      mediaUnderstandingProviderIds: [],
-      imageGenerationProviderIds: [],
-    });
-  });
-
-  it("tracks every provider, speech, media, image, or web search plugin in the registration registry", () => {
-    const expectedPluginIds = [
-      ...new Set([
-        ...pluginRegistrationContractRegistry
-          .filter((entry) => entry.providerIds.length > 0)
-          .map((entry) => entry.pluginId),
-        ...speechProviderContractRegistry.map((entry) => entry.pluginId),
-        ...mediaUnderstandingProviderContractRegistry.map((entry) => entry.pluginId),
-        ...imageGenerationProviderContractRegistry.map((entry) => entry.pluginId),
-        ...pluginRegistrationContractRegistry
-          .filter((entry) => entry.webSearchProviderIds.length > 0)
-          .map((entry) => entry.pluginId),
-      ]),
-    ].toSorted((left, right) => left.localeCompare(right));
-
+    expect(actualPluginIds).toEqual(expectedPluginIds);
     expect(
-      pluginRegistrationContractRegistry
-        .map((entry) => entry.pluginId)
-        .toSorted((left, right) => left.localeCompare(right)),
-    ).toEqual(expectedPluginIds);
+      actualPluginIds.filter((pluginId) => !bundledWebSearchPluginIds.includes(pluginId)),
+    ).toEqual([...ACTIVATION_SCOPED_WEB_SEARCH_PLUGIN_IDS]);
   });
 
-  it("keeps bundled speech voice-list support explicit", () => {
-    expect(findSpeechProviderForPlugin("openai").listVoices).toEqual(expect.any(Function));
-    expect(findSpeechProviderForPlugin("elevenlabs").listVoices).toEqual(expect.any(Function));
-    expect(findSpeechProviderForPlugin("microsoft").listVoices).toEqual(expect.any(Function));
-  });
-
-  it("keeps bundled multi-image support explicit", () => {
-    expect(findMediaUnderstandingProviderForPlugin("anthropic").describeImages).toEqual(
-      expect.any(Function),
-    );
-    expect(findMediaUnderstandingProviderForPlugin("google").describeImages).toEqual(
-      expect.any(Function),
-    );
-    expect(findMediaUnderstandingProviderForPlugin("minimax").describeImages).toEqual(
-      expect.any(Function),
-    );
-    expect(findMediaUnderstandingProviderForPlugin("moonshot").describeImages).toEqual(
-      expect.any(Function),
-    );
-    expect(findMediaUnderstandingProviderForPlugin("openai").describeImages).toEqual(
-      expect.any(Function),
-    );
-    expect(findMediaUnderstandingProviderForPlugin("zai").describeImages).toEqual(
-      expect.any(Function),
-    );
-  });
-
-  it("keeps bundled image-generation support explicit", () => {
-    expect(findImageGenerationProviderForPlugin("google").generateImage).toEqual(
-      expect.any(Function),
-    );
-    expect(findImageGenerationProviderForPlugin("minimax").generateImage).toEqual(
-      expect.any(Function),
-    );
-    expect(findImageGenerationProviderForPlugin("openai").generateImage).toEqual(
-      expect.any(Function),
-    );
+  it("covers every bundled migration provider plugin discovered from manifests", () => {
+    expectRegistryPluginIds({
+      actualPluginIds: pluginRegistrationContractRegistry
+        .filter((entry) => entry.migrationProviderIds.length > 0)
+        .map((entry) => entry.pluginId),
+      predicate: (plugin) =>
+        plugin.origin === "bundled" && (plugin.contracts?.migrationProviders?.length ?? 0) > 0,
+    });
   });
 });

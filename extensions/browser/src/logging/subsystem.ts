@@ -1,1 +1,4 @@
-export * from "openclaw/plugin-sdk/browser-support";
+/**
+ * Subsystem logger factory re-exported for Browser modules.
+ */
+export { createSubsystemLogger } from "openclaw/plugin-sdk/logging-core";

@@ -1,11 +1,40 @@
+/**
+ * Core tool catalog and profile defaults.
+ * Drives built-in profile allowlists, group expansion, and UI section metadata
+ * for OpenClaw-owned tools.
+ *
+ * This module is bundled into the Control UI via tool-policy-shared. Keep it
+ * pure data + tiny pure functions: a value import of server config/runtime
+ * modules here drags the whole gateway graph into the ui build and breaks it.
+ */
+import {
+  AGENTS_WAIT_TOOL_DISPLAY_SUMMARY,
+  ASK_USER_TOOL_DISPLAY_SUMMARY,
+  CRON_TOOL_DISPLAY_SUMMARY,
+  EXEC_TOOL_DISPLAY_SUMMARY,
+  PROCESS_TOOL_DISPLAY_SUMMARY,
+  SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY,
+  SESSIONS_LIST_TOOL_DISPLAY_SUMMARY,
+  SESSIONS_SEARCH_TOOL_DISPLAY_SUMMARY,
+  SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
+  SESSIONS_SPAWN_TOOL_DISPLAY_SUMMARY,
+  SESSION_STATUS_TOOL_DISPLAY_SUMMARY,
+  SKILL_WORKSHOP_TOOL_DISPLAY_SUMMARY,
+  SUGGEST_TASK_TOOL_DISPLAY_SUMMARY,
+  DISMISS_TASK_TOOL_DISPLAY_SUMMARY,
+} from "./tool-description-presets.js";
+import { AUTOMATIONS_TOOL_NAME } from "./tools/automations-tool-name.js";
+
+/** Built-in tool profile ids exposed in config and UI. */
 export type ToolProfileId = "minimal" | "coding" | "messaging" | "full";
 
+/** Allow/deny policy generated from a built-in tool profile. */
 type ToolProfilePolicy = {
   allow?: string[];
   deny?: string[];
 };
 
-export type CoreToolSection = {
+type CoreToolSection = {
   id: string;
   label: string;
   tools: Array<{
@@ -70,16 +99,32 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   {
     id: "exec",
     label: "exec",
-    description: "Run shell commands",
+    description: EXEC_TOOL_DISPLAY_SUMMARY,
     sectionId: "runtime",
     profiles: ["coding"],
   },
   {
     id: "process",
     label: "process",
-    description: "Manage background processes",
+    description: PROCESS_TOOL_DISPLAY_SUMMARY,
     sectionId: "runtime",
     profiles: ["coding"],
+  },
+  {
+    id: "code_execution",
+    label: "code_execution",
+    description: "Run sandboxed remote analysis",
+    sectionId: "runtime",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "secrets",
+    label: "secrets",
+    description: "Request and manage write-only credentials",
+    sectionId: "runtime",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
   },
   {
     id: "web_search",
@@ -93,6 +138,14 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     id: "web_fetch",
     label: "web_fetch",
     description: "Fetch web content",
+    sectionId: "web",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "x_search",
+    label: "x_search",
+    description: "Search X posts",
     sectionId: "web",
     profiles: ["coding"],
     includeInOpenClawGroup: true,
@@ -114,9 +167,17 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+    id: "sessions",
+    label: "sessions",
+    description: "Session settings: label, pin, archive, groups",
+    sectionId: "sessions",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
     id: "sessions_list",
     label: "sessions_list",
-    description: "List sessions",
+    description: SESSIONS_LIST_TOOL_DISPLAY_SUMMARY,
     sectionId: "sessions",
     profiles: ["coding", "messaging"],
     includeInOpenClawGroup: true,
@@ -124,7 +185,39 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   {
     id: "sessions_history",
     label: "sessions_history",
-    description: "Session history",
+    description: SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY,
+    sectionId: "sessions",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "sessions_search",
+    label: "sessions_search",
+    description: SESSIONS_SEARCH_TOOL_DISPLAY_SUMMARY,
+    sectionId: "sessions",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "conversations_list",
+    label: "conversations_list",
+    description: "List exact external conversation addresses",
+    sectionId: "sessions",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "conversations_send",
+    label: "conversations_send",
+    description: "Send to an exact external conversation",
+    sectionId: "sessions",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "conversations_turn",
+    label: "conversations_turn",
+    description: "Send and wait for a correlated external reply",
     sectionId: "sessions",
     profiles: ["coding", "messaging"],
     includeInOpenClawGroup: true,
@@ -132,7 +225,7 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   {
     id: "sessions_send",
     label: "sessions_send",
-    description: "Send to session",
+    description: SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
     sectionId: "sessions",
     profiles: ["coding", "messaging"],
     includeInOpenClawGroup: true,
@@ -140,7 +233,31 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   {
     id: "sessions_spawn",
     label: "sessions_spawn",
-    description: "Spawn sub-agent",
+    description: SESSIONS_SPAWN_TOOL_DISPLAY_SUMMARY,
+    sectionId: "sessions",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "github_identity_status",
+    label: "github_identity_status",
+    description: "Inspect the effective GitHub identity and credential health",
+    sectionId: "sessions",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "github_publish",
+    label: "github_publish",
+    description: "Publish the reconciled session worktree as a draft GitHub pull request",
+    sectionId: "sessions",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "agents_wait",
+    label: "agents_wait",
+    description: AGENTS_WAIT_TOOL_DISPLAY_SUMMARY,
     sectionId: "sessions",
     profiles: ["coding"],
     includeInOpenClawGroup: true,
@@ -150,23 +267,39 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     label: "sessions_yield",
     description: "End turn to receive sub-agent results",
     sectionId: "sessions",
-    profiles: ["coding"],
+    profiles: ["coding", "messaging"],
     includeInOpenClawGroup: true,
   },
   {
     id: "subagents",
     label: "subagents",
-    description: "Manage sub-agents",
+    description: "Background work: subagents, media gen, automation runs. list/cancel.",
     sectionId: "sessions",
-    profiles: ["coding"],
+    profiles: ["coding", "messaging"],
     includeInOpenClawGroup: true,
   },
   {
     id: "session_status",
     label: "session_status",
-    description: "Session status",
+    description: SESSION_STATUS_TOOL_DISPLAY_SUMMARY,
     sectionId: "sessions",
     profiles: ["minimal", "coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "suggest_task",
+    label: "suggest_task",
+    description: SUGGEST_TASK_TOOL_DISPLAY_SUMMARY,
+    sectionId: "sessions",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "dismiss_task",
+    label: "dismiss_task",
+    description: DISMISS_TASK_TOOL_DISPLAY_SUMMARY,
+    sectionId: "sessions",
+    profiles: ["coding"],
     includeInOpenClawGroup: true,
   },
   {
@@ -178,9 +311,48 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+    id: "screen",
+    label: "screen",
+    description: "Drive operator web UI",
+    sectionId: "ui",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "dashboard",
+    label: "dashboard",
+    description: "Read and arrange the session dashboard",
+    sectionId: "ui",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "terminal",
+    label: "terminal",
+    description: "Use shared operator terminals with policy-governed input",
+    sectionId: "ui",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "portal",
+    label: "portal",
+    description: "Expose local web apps through the gateway",
+    sectionId: "ui",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
     id: "canvas",
     label: "canvas",
-    description: "Control canvases",
+    description: "Control node Canvas surfaces when the Canvas plugin is enabled",
+    sectionId: "ui",
+    profiles: [],
+  },
+  {
+    id: "show_widget",
+    label: "show_widget",
+    description: "Show an interactive widget on chat or an auto-fitting dashboard",
     sectionId: "ui",
     profiles: [],
     includeInOpenClawGroup: true,
@@ -194,9 +366,17 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
-    id: "cron",
-    label: "cron",
-    description: "Schedule tasks",
+    id: "heartbeat_respond",
+    label: "heartbeat_respond",
+    description: "Accept heartbeat outcomes for post-turn handling",
+    sectionId: "automation",
+    profiles: [],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: AUTOMATIONS_TOOL_NAME,
+    label: AUTOMATIONS_TOOL_NAME,
+    description: CRON_TOOL_DISPLAY_SUMMARY,
     sectionId: "automation",
     profiles: ["coding"],
     includeInOpenClawGroup: true,
@@ -204,7 +384,7 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
   {
     id: "gateway",
     label: "gateway",
-    description: "Gateway control",
+    description: "Read Gateway config and schema",
     sectionId: "automation",
     profiles: [],
     includeInOpenClawGroup: true,
@@ -218,6 +398,22 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+    id: "computer",
+    label: "computer",
+    description: "Control a paired computer node desktop",
+    sectionId: "nodes",
+    profiles: [],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "mobile_ui",
+    label: "mobile_ui",
+    description: "Observe and control a paired Android app",
+    sectionId: "nodes",
+    profiles: [],
+    includeInOpenClawGroup: true,
+  },
+  {
     id: "agents_list",
     label: "agents_list",
     description: "List agents",
@@ -226,8 +422,56 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
-    id: "image",
-    label: "image",
+    id: "get_goal",
+    label: "get_goal",
+    description: "Get current thread goal",
+    sectionId: "agents",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "create_goal",
+    label: "create_goal",
+    description: "Create a thread goal",
+    sectionId: "agents",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "update_goal",
+    label: "update_goal",
+    description: "Complete or block a thread goal",
+    sectionId: "agents",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "progress_card",
+    label: "progress_card",
+    description: "Maintain the session progress card",
+    sectionId: "agents",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "ask_user",
+    label: "ask_user",
+    description: ASK_USER_TOOL_DISPLAY_SUMMARY,
+    sectionId: "agents",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "skill_workshop",
+    label: "skill_workshop",
+    description: SKILL_WORKSHOP_TOOL_DISPLAY_SUMMARY,
+    sectionId: "agents",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "view_image",
+    label: "view_image",
     description: "Image understanding",
     sectionId: "media",
     profiles: ["coding"],
@@ -237,6 +481,22 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     id: "image_generate",
     label: "image_generate",
     description: "Image generation",
+    sectionId: "media",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "music_generate",
+    label: "music_generate",
+    description: "Music generation",
+    sectionId: "media",
+    profiles: ["coding"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "video_generate",
+    label: "video_generate",
+    description: "Video generation",
     sectionId: "media",
     profiles: ["coding"],
     includeInOpenClawGroup: true,
@@ -266,12 +526,14 @@ const CORE_TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
     allow: listCoreToolIdsForProfile("minimal"),
   },
   coding: {
-    allow: listCoreToolIdsForProfile("coding"),
+    allow: [...listCoreToolIdsForProfile("coding"), "bundle-mcp"],
   },
   messaging: {
-    allow: listCoreToolIdsForProfile("messaging"),
+    allow: [...listCoreToolIdsForProfile("messaging"), "bundle-mcp"],
   },
-  full: {},
+  full: {
+    allow: ["*"],
+  },
 };
 
 function buildCoreToolGroupMap() {
@@ -291,8 +553,10 @@ function buildCoreToolGroupMap() {
   };
 }
 
+/** Built-in core tool groups keyed by group id. */
 export const CORE_TOOL_GROUPS = buildCoreToolGroupMap();
 
+/** Profile options shown in model/tool configuration UIs. */
 export const PROFILE_OPTIONS = [
   { id: "minimal", label: "Minimal" },
   { id: "coding", label: "Coding" },
@@ -300,6 +564,7 @@ export const PROFILE_OPTIONS = [
   { id: "full", label: "Full" },
 ] as const;
 
+/** Resolves the allow/deny policy for a built-in tool profile. */
 export function resolveCoreToolProfilePolicy(profile?: string): ToolProfilePolicy | undefined {
   if (!profile) {
     return undefined;
@@ -317,11 +582,25 @@ export function resolveCoreToolProfilePolicy(profile?: string): ToolProfilePolic
   };
 }
 
-export function listCoreToolSections(): CoreToolSection[] {
+/** Lists core tools grouped into UI sections. */
+export function listCoreToolSections(params?: {
+  swarmEnabled?: boolean;
+  githubPublicationAvailable?: boolean;
+}): CoreToolSection[] {
+  // Callers resolve the swarm gate and pass the fact in; resolving config here
+  // would couple this ui-shared module to the server graph.
+  const swarmEnabled = params?.swarmEnabled === true;
   return CORE_TOOL_SECTION_ORDER.map((section) => ({
     id: section.id,
     label: section.label,
-    tools: CORE_TOOL_DEFINITIONS.filter((tool) => tool.sectionId === section.id).map((tool) => ({
+    tools: CORE_TOOL_DEFINITIONS.filter(
+      (tool) =>
+        tool.sectionId === section.id &&
+        (tool.id !== "agents_wait" || swarmEnabled) &&
+        (tool.id !== "github_identity_status" ||
+          params?.githubPublicationAvailable !== undefined) &&
+        (tool.id !== "github_publish" || params?.githubPublicationAvailable === true),
+    ).map((tool) => ({
       id: tool.id,
       label: tool.label,
       description: tool.description,
@@ -329,6 +608,7 @@ export function listCoreToolSections(): CoreToolSection[] {
   })).filter((section) => section.tools.length > 0);
 }
 
+/** Lists built-in profile ids that include a core tool. */
 export function resolveCoreToolProfiles(toolId: string): ToolProfileId[] {
   const tool = CORE_TOOL_BY_ID.get(toolId);
   if (!tool) {
@@ -337,6 +617,7 @@ export function resolveCoreToolProfiles(toolId: string): ToolProfileId[] {
   return [...tool.profiles];
 }
 
+/** Returns true when a tool id is a known core tool. */
 export function isKnownCoreToolId(toolId: string): boolean {
   return CORE_TOOL_BY_ID.has(toolId);
 }

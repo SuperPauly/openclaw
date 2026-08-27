@@ -1,61 +1,40 @@
+// Plugin shape contract tests cover manifest, API, and runtime export shapes.
+import {
+  createPluginRegistryFixture,
+  registerVirtualTestPlugin,
+} from "openclaw/plugin-sdk/plugin-test-contracts";
 import { describe, expect, it } from "vitest";
-import type { OpenClawConfig } from "../../config/config.js";
-import { createPluginRegistry, type PluginRecord } from "../registry.js";
-import type { PluginRuntime } from "../runtime/types.js";
-import { buildAllPluginInspectReports } from "../status.js";
-import { createPluginRecord } from "../status.test-helpers.js";
-import type { OpenClawPluginApi } from "../types.js";
-
-function registerTestPlugin(params: {
-  registry: ReturnType<typeof createPluginRegistry>;
-  config: OpenClawConfig;
-  record: PluginRecord;
-  register(api: OpenClawPluginApi): void;
-}) {
-  params.registry.registry.plugins.push(params.record);
-  params.register(
-    params.registry.createApi(params.record, {
-      config: params.config,
-    }),
-  );
-}
+import { buildPluginShapeSummary } from "../inspect-shape.js";
 
 describe("plugin shape compatibility matrix", () => {
-  it("keeps legacy hook-only, plain capability, and hybrid capability shapes explicit", () => {
-    const config = {} as OpenClawConfig;
-    const registry = createPluginRegistry({
-      logger: {
-        info() {},
-        warn() {},
-        error() {},
-        debug() {},
+  it("keeps hook-only, plain capability, and hybrid capability shapes explicit", () => {
+    const { config, registry } = createPluginRegistryFixture({
+      plugins: {
+        entries: {
+          "hook-only": {
+            hooks: {
+              allowConversationAccess: true,
+            },
+          },
+        },
       },
-      runtime: {} as PluginRuntime,
     });
 
-    registerTestPlugin({
+    registerVirtualTestPlugin({
       registry,
       config,
-      record: createPluginRecord({
-        id: "lca-legacy",
-        name: "LCA Legacy",
-        source: "/virtual/lca-legacy/index.ts",
-      }),
+      id: "hook-only",
+      name: "Hook Only",
       register(api) {
-        api.on("before_agent_start", () => ({
-          prependContext: "legacy",
-        }));
+        api.on("before_prompt_build", () => ({ prependContext: "hook-only" }));
       },
     });
 
-    registerTestPlugin({
+    registerVirtualTestPlugin({
       registry,
       config,
-      record: createPluginRecord({
-        id: "plain-provider",
-        name: "Plain Provider",
-        source: "/virtual/plain-provider/index.ts",
-      }),
+      id: "plain-provider",
+      name: "Plain Provider",
       register(api) {
         api.registerProvider({
           id: "plain-provider",
@@ -65,14 +44,11 @@ describe("plugin shape compatibility matrix", () => {
       },
     });
 
-    registerTestPlugin({
+    registerVirtualTestPlugin({
       registry,
       config,
-      record: createPluginRecord({
-        id: "hybrid-company",
-        name: "Hybrid Company",
-        source: "/virtual/hybrid-company/index.ts",
-      }),
+      id: "hybrid-company",
+      name: "Hybrid Company",
       register(api) {
         api.registerProvider({
           id: "hybrid-company",
@@ -100,14 +76,11 @@ describe("plugin shape compatibility matrix", () => {
       },
     });
 
-    registerTestPlugin({
+    registerVirtualTestPlugin({
       registry,
       config,
-      record: createPluginRecord({
-        id: "channel-demo",
-        name: "Channel Demo",
-        source: "/virtual/channel-demo/index.ts",
-      }),
+      id: "channel-demo",
+      name: "Channel Demo",
       register(api) {
         api.registerChannel({
           plugin: {
@@ -130,13 +103,37 @@ describe("plugin shape compatibility matrix", () => {
       },
     });
 
-    const inspect = buildAllPluginInspectReports({
+    registerVirtualTestPlugin({
+      registry,
       config,
-      report: {
-        workspaceDir: "/virtual-workspace",
-        ...registry.registry,
+      id: "session-catalog-demo",
+      name: "Session Catalog Demo",
+      register(api) {
+        api.registerSessionCatalog({
+          id: "session-catalog-demo",
+          label: "Session Catalog Demo",
+          list: async () => [],
+          read: async ({ hostId, threadId }) => ({ hostId, threadId, items: [] }),
+        });
       },
     });
+
+    registerVirtualTestPlugin({
+      registry,
+      config,
+      id: "document-extract-test",
+      name: "Document Extract Test",
+      contracts: { documentExtractors: ["pdf"] },
+      register() {},
+    });
+
+    const report = {
+      workspaceDir: "/virtual-workspace",
+      ...registry.registry,
+    };
+    const inspect = report.plugins.map((plugin) =>
+      Object.assign({ plugin }, buildPluginShapeSummary({ plugin, report })),
+    );
 
     expect(
       inspect.map((entry) => ({
@@ -146,7 +143,7 @@ describe("plugin shape compatibility matrix", () => {
       })),
     ).toEqual([
       {
-        id: "lca-legacy",
+        id: "hook-only",
         shape: "hook-only",
         capabilityMode: "none",
       },
@@ -165,14 +162,27 @@ describe("plugin shape compatibility matrix", () => {
         shape: "plain-capability",
         capabilityMode: "plain",
       },
+      {
+        id: "session-catalog-demo",
+        shape: "plain-capability",
+        capabilityMode: "plain",
+      },
+      {
+        id: "document-extract-test",
+        shape: "plain-capability",
+        capabilityMode: "plain",
+      },
     ]);
 
-    expect(inspect[0]?.usesLegacyBeforeAgentStart).toBe(true);
-    expect(inspect[1]?.capabilities.map((entry) => entry.kind)).toEqual(["text-inference"]);
-    expect(inspect[2]?.capabilities.map((entry) => entry.kind)).toEqual([
-      "text-inference",
-      "web-search",
-    ]);
-    expect(inspect[3]?.capabilities.map((entry) => entry.kind)).toEqual(["channel"]);
+    expect(inspect.map((entry) => entry.capabilities.map((capability) => capability.kind))).toEqual(
+      [
+        [],
+        ["text-inference"],
+        ["text-inference", "web-search"],
+        ["channel"],
+        ["session-catalog"],
+        ["document-extractors"],
+      ],
+    );
   });
 });
