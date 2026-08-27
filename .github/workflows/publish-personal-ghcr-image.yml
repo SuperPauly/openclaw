@@ -1,0 +1,194 @@
+name: Publish Personal GHCR Image
+
+# Manual-only publisher for a single multi-arch OpenClaw runtime image.
+# Compose uses the same image for gateway and CLI services — do not split them.
+# Secrets, tokens, .env, openclaw.json, auth profiles, and workspaces stay off
+# the image and out of this workflow; mount them at deploy time instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable image tag to publish (for example personal-2026.8.27)
+        required: true
+        type: string
+      extensions:
+        description: Comma-separated extension ids passed as OPENCLAW_EXTENSIONS
+        required: false
+        default: diagnostics-otel,codex
+        type: string
+      install_browser:
+        description: When true, bake Chromium into the image (OPENCLAW_INSTALL_BROWSER=1)
+        required: false
+        default: false
+        type: boolean
+      push_latest:
+        description: When true, also tag the image as latest
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+
+concurrency:
+  group: publish-personal-ghcr-image-${{ github.repository_owner }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Build and push personal OpenClaw image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate inputs and resolve image name
+        id: prep
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_EXTENSIONS: ${{ inputs.extensions }}
+          INPUT_INSTALL_BROWSER: ${{ inputs.install_browser }}
+          INPUT_PUSH_LATEST: ${{ inputs.push_latest }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          tag="$(printf '%s' "${INPUT_TAG}" | tr -d '[:space:]')"
+          if [[ -z "${tag}" ]]; then
+            echo "::error::tag input is required and must be non-empty."
+            exit 1
+          fi
+          # Docker tag grammar (simplified): keep tags immutable and GHCR-safe.
+          if [[ ! "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::tag must match [A-Za-z0-9_][A-Za-z0-9._-]{0,127}; got '${tag}'."
+            exit 1
+          fi
+          if [[ "${tag}" == latest ]]; then
+            echo "::error::use push_latest=true instead of setting tag=latest."
+            exit 1
+          fi
+
+          owner="$(printf '%s' "${REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/${owner}/openclaw"
+          extensions="$(printf '%s' "${INPUT_EXTENSIONS}" | tr -d '[:space:]')"
+          if [[ -z "${extensions}" ]]; then
+            extensions="diagnostics-otel,codex"
+          fi
+
+          timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          {
+            echo "tag=${tag}"
+            echo "image=${image}"
+            echo "extensions=${extensions}"
+            echo "install_browser=${INPUT_INSTALL_BROWSER}"
+            echo "push_latest=${INPUT_PUSH_LATEST}"
+            echo "timestamp=${timestamp}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "args<<EOF"
+            echo "GIT_COMMIT=${GITHUB_SHA}"
+            echo "OPENCLAW_BUILD_TIMESTAMP=${timestamp}"
+            echo "OPENCLAW_EXTENSIONS=${extensions}"
+            if [[ "${INPUT_INSTALL_BROWSER}" == "true" ]]; then
+              echo "OPENCLAW_INSTALL_BROWSER=1"
+            fi
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ steps.prep.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.prep.outputs.tag }}
+            type=raw,value=latest,enable=${{ steps.prep.outputs.push_latest == 'true' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.prep.outputs.tag }}
+            org.opencontainers.image.created=${{ steps.prep.outputs.timestamp }}
+            org.opencontainers.image.title=OpenClaw
+            org.opencontainers.image.description=Personal OpenClaw runtime image (gateway + CLI)
+
+      - name: Build and push multi-arch runtime image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ steps.prep.outputs.args }}
+          cache-from: type=gha,scope=publish-personal-ghcr-image
+          cache-to: type=gha,mode=max,scope=publish-personal-ghcr-image
+          sbom: true
+          provenance: mode=max
+
+      - name: Summarize published image
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          EXTENSIONS: ${{ steps.prep.outputs.extensions }}
+          IMAGE: ${{ steps.prep.outputs.image }}
+          INSTALL_BROWSER: ${{ steps.prep.outputs.install_browser }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          TIMESTAMP: ${{ steps.prep.outputs.timestamp }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Personal GHCR image"
+            echo "- Status: ${BUILD_OUTCOME}"
+            echo "- Image: \`${IMAGE}\`"
+            echo "- Platforms: linux/amd64, linux/arm64"
+            echo "- Digest: \`${DIGEST:-n/a}\`"
+            echo "- Build timestamp (UTC): \`${TIMESTAMP:-n/a}\`"
+            echo "- OPENCLAW_EXTENSIONS: \`${EXTENSIONS:-}\`"
+            echo "- OPENCLAW_INSTALL_BROWSER: \`${INSTALL_BROWSER}\`"
+            echo "- GIT_COMMIT: \`${GITHUB_SHA}\`"
+            echo
+            echo "### Pushed tags"
+            if [[ -n "${TAGS}" ]]; then
+              while IFS= read -r tag; do
+                [[ -z "${tag}" ]] && continue
+                echo "- \`${tag}\`"
+              done <<< "${TAGS}"
+            else
+              echo "- _(none)_"
+            fi
+            echo
+            echo "### Deploy notes"
+            echo "Keep API keys, gateway tokens, \`.env\`, \`openclaw.json\`, auth-profile secrets, and workspaces on host mounts or Compose secrets — never bake them into this image."
+            echo "Point a personal Compose file at \`${IMAGE}:<tag>\` (or \`@${DIGEST:-<digest>}\`) and persist \`/home/node/.openclaw\` plus auth-profile mounts across restarts."
+          } >> "${GITHUB_STEP_SUMMARY}"
