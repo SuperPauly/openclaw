@@ -1,0 +1,67 @@
+name: OpenClaw Config Schema
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openclaw-config-schema-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  generate:
+    name: Generate openclaw.json schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          cache-mode: restore
+          install-bun: "false"
+
+      - name: Build CLI
+        run: pnpm build
+
+      - name: Generate config schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p config
+          # CLI prints JSON Schema for openclaw.json; keep stdout reserved for the document.
+          node openclaw.mjs config schema --json > config/openclaw.json
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const path = "config/openclaw.json";
+          const raw = fs.readFileSync(path, "utf8");
+          if (!raw.trim()) {
+            throw new Error(`${path} is empty`);
+          }
+          const schema = JSON.parse(raw);
+          if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+            throw new Error(`${path} must be a JSON object`);
+          }
+          if (!schema.properties || typeof schema.properties !== "object") {
+            throw new Error(`${path} is missing schema properties`);
+          }
+          console.log(`Wrote ${path} (${Buffer.byteLength(raw)} bytes)`);
+          NODE
+
+      - name: Upload config schema
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: openclaw-config-schema
+          path: config/openclaw.json
+          if-no-files-found: error
+          retention-days: 30
