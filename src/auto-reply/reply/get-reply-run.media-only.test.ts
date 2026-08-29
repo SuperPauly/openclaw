@@ -332,7 +332,7 @@ function createGatewayDrainingError(): Error {
 }
 
 const ROOM_EVENT_MESSAGE_TOOL_DIRECTIVE =
-  "Treat the current message as observed room activity. Default: no reply; most room events need no response from you. Send a visible reply via message(action=send) only when you are directly addressed or have concrete value to add; your final text here stays private either way.";
+  "Treat this message as observed room activity, not a request. You were not explicitly tagged or mentioned in this room event. Default: stay silent. Only respond if you have something useful, substantial, or important to add. A previous mention or reply is not an invitation to keep talking. To respond visibly, use message(action=send); your final text here stays private either way.";
 
 function createInboundBody<T extends string>(body: T) {
   return { Body: body, RawBody: body, CommandBody: body };
@@ -1369,47 +1369,55 @@ describe("runPreparedReply media-only handling", () => {
     },
   );
 
-  it("keeps explicitly suppressed command-shaped Gateway text in the model prompt", async () => {
-    const body = "/model openai/gpt-5.5";
-    const onDeliberateSilentTerminalReply = vi.fn();
-    vi.mocked(hasControlCommand).mockReturnValue(true);
+  it.each([
+    "/model openai/gpt-5.5",
+    "/think high",
+    "Keep  /thinking:high as text",
+    "/new",
+    "/reset",
+  ])(
+    "keeps explicitly suppressed command-shaped Gateway text in the model prompt: %s",
+    async (body) => {
+      const onDeliberateSilentTerminalReply = vi.fn();
+      vi.mocked(hasControlCommand).mockReturnValue(true);
 
-    const result = await runPreparedReply(
-      baseParams({
-        ctx: {
-          ...createInboundTurn(body, "webchat", "direct"),
-          CommandAuthorized: false,
-          CommandInterpretationSuppressed: true,
-          CommandTurn: {
-            kind: "normal",
-            source: "message",
-            authorized: false,
-            body,
+      const result = await runPreparedReply(
+        baseParams({
+          ctx: {
+            ...createInboundTurn(body, "webchat", "direct"),
+            CommandAuthorized: false,
+            CommandInterpretationSuppressed: true,
+            CommandTurn: {
+              kind: "normal",
+              source: "message",
+              authorized: false,
+              body,
+            },
           },
-        },
-        sessionCtx: {
-          ...createSessionTurn(body, "webchat", "direct"),
-        },
-        commandAuthorized: false,
-        command: {
-          surface: "webchat",
-          channel: "webchat",
-          isAuthorizedSender: false,
-          abortKey: "session-key",
-          ownerList: [],
-          senderIsOwner: false,
-          rawBodyNormalized: body,
-          commandBodyNormalized: body,
-        } as never,
-        isNewSession: false,
-        opts: { onDeliberateSilentTerminalReply },
-      }),
-    );
+          sessionCtx: {
+            ...createSessionTurn(body, "webchat", "direct"),
+          },
+          commandAuthorized: false,
+          command: {
+            surface: "webchat",
+            channel: "webchat",
+            isAuthorizedSender: false,
+            abortKey: "session-key",
+            ownerList: [],
+            senderIsOwner: false,
+            rawBodyNormalized: body,
+            commandBodyNormalized: body,
+          } as never,
+          isNewSession: body === "/new" || body === "/reset",
+          opts: { onDeliberateSilentTerminalReply },
+        }),
+      );
 
-    expect(result).toEqual({ text: "ok" });
-    expect(requireRunReplyAgentCall().followupRun.prompt).toBe(body);
-    expect(onDeliberateSilentTerminalReply).not.toHaveBeenCalled();
-  });
+      expect(result).toEqual({ text: "ok" });
+      expect(requireRunReplyAgentCall().followupRun.prompt).toBe(body);
+      expect(onDeliberateSilentTerminalReply).not.toHaveBeenCalled();
+    },
+  );
 
   it("silently drops an explicit unauthorized whole-message text slash command", async () => {
     const body = "/model openai/gpt-5.5";
@@ -3753,9 +3761,12 @@ describe("runPreparedReply media-only handling", () => {
       expect(heartbeatRun.sourceReplyDeliveryMode).toBe(stableMode);
       expect(roomEventRun.extraSystemPrompt).toBe(expectedPrompt);
       expect(requireRunReplyAgentCall(0).followupRun.currentInboundContext?.text).toContain(
-        "your final text here stays private either way",
+        "You were not explicitly tagged or mentioned in this room event",
       );
       expect(roomEventRun.extraSystemPromptStatic).toBe(expectedPrompt);
+      expect(roomEventRun.extraSystemPromptStatic).not.toContain(
+        "You were not explicitly tagged or mentioned in this room event",
+      );
       expect(primaryRun.extraSystemPromptStatic).toBe(roomEventRun.extraSystemPromptStatic);
       expect(heartbeatRun.extraSystemPromptStatic).toBe(roomEventRun.extraSystemPromptStatic);
       expect(roomEventRun.cliSessionBindingFacts).toEqual({

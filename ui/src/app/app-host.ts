@@ -1,7 +1,6 @@
 import { property, query, state } from "lit/decorators.js";
 import type { GatewayBrowserClient, GatewayEventFrame } from "../api/gateway.ts";
 import "../components/app-topbar.ts";
-import "../components/macos-titlebar-controls.ts";
 import "../components/modal-dialog.ts";
 import {
   formatDocumentTitle,
@@ -9,7 +8,6 @@ import {
   titleForRoute,
 } from "../app-navigation.ts";
 import "../components/resizable-divider.ts";
-import "../components/update-banner.ts";
 import { isSessionRouteId } from "../app-route-paths.ts";
 import { APP_ROUTE_IDS, type RouteId } from "../app-routes.ts";
 import {
@@ -70,7 +68,6 @@ import {
   type OptionalCustomElement,
   TERMINAL_PANEL_ELEMENT,
 } from "./lazy-custom-element.ts";
-import { hasStoredLazyShellAction } from "./lazy-shell-action.ts";
 import { postNativeNavState, type NativeNavState } from "./native-nav-state.ts";
 import { readNativeHistoryState, type NativeHistoryState } from "./native-web-chrome.ts";
 import { resolveOnboardingMode } from "./onboarding-mode.ts";
@@ -81,15 +78,7 @@ import {
   pushServerUiPrefs,
 } from "./server-prefs.ts";
 import { setSettingsChangeListener } from "./settings.ts";
-import {
-  isStaleChunkImportError,
-  retryStaleChunkReloadWhenReachable,
-  scheduleStaleChunkReload,
-} from "./stale-chunk-reload.ts";
-
-type AppSidebarElement = HTMLElement & {
-  dismissTransientMenus: () => boolean;
-};
+import { isStaleChunkImportError, scheduleStaleChunkReload } from "./stale-chunk-reload.ts";
 
 const APP_SIDEBAR_TAG = "openclaw-app-sidebar";
 // Stable references so the sidebar's enabledRouteIds property does not churn
@@ -157,8 +146,7 @@ class OpenClawShell
   readonly lazyCustomElements = new LazyCustomElementRequestController(
     this,
     () => this.shellChrome.cancelPendingLazyAction(),
-    () =>
-      hasStoredLazyShellAction() ? retryStaleChunkReloadWhenReachable() : Promise.resolve(false),
+    (canReload) => this.shellChrome.retryPendingLazyAction(canReload),
   );
   // Gates lazy-action replay on the element being rendered; while the shell is
   // still splash-gated, replaying would loop through the open handlers forever.
@@ -172,7 +160,7 @@ class OpenClawShell
   // Desktop and modal navigation are two slots for the same live sidebar.
   // Moving its element preserves session controllers and the resident pet
   // instead of resetting their lifecycle at every responsive breakpoint.
-  readonly navigationSidebar = document.createElement(APP_SIDEBAR_TAG) as AppSidebarElement;
+  readonly navigationSidebar = document.createElement(APP_SIDEBAR_TAG);
   // Where "Back to app" / Escape leaves the settings takeover; falls back to
   // chat (the app default route) when settings was the entry point.
   lastWorkspaceLocation: ShellNavigationHost["lastWorkspaceLocation"] = null;
@@ -520,11 +508,11 @@ class OpenClawShell
     this.shellNavigation.selectChatSession(sessionKey, agentId);
   }
   private readonly handleGatewayEvent = (event: GatewayEventFrame) => {
-    if (event.event === "config.changed") {
+    if (event.event === "config.changed" || event.event === "chat.metadata.changed") {
       const client = this.context?.gateway?.snapshot.client;
       if (client) {
-        invalidateChatMetadataStore(client);
         invalidateModelCatalogCache(client);
+        invalidateChatMetadataStore(client);
       }
     }
     this.shellGateway.handleGatewayEvent(event);
@@ -728,8 +716,8 @@ class OpenClawShell
       // A disconnect can retain the browser client, so object identity alone
       // cannot keep metadata alive across logical Gateway connections.
       if (snapshot.client) {
-        invalidateChatMetadataStore(snapshot.client);
         invalidateModelCatalogCache(snapshot.client);
+        invalidateChatMetadataStore(snapshot.client);
       }
     }
     this.shellGateway.synchronizeGateway(snapshot);

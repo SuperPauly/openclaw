@@ -12,6 +12,7 @@ import ai.openclaw.app.chat.ChatMessage
 import ai.openclaw.app.chat.ChatOutboxItem
 import ai.openclaw.app.chat.ChatPendingToolCall
 import ai.openclaw.app.chat.ChatProgressCard
+import ai.openclaw.app.chat.ChatQuestionDraft
 import ai.openclaw.app.chat.ChatQuestionPrompt
 import ai.openclaw.app.chat.ChatSessionDeletion
 import ai.openclaw.app.chat.ChatSessionEntry
@@ -152,6 +153,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -764,6 +766,7 @@ class NodeRuntime private constructor(
   private val chatCommandOutbox = chatStores.commandOutbox
   private val clientDatabases = chatStores.clientDatabases
   private val externalTranscriptCache = chatStores.externalTranscriptCache
+  private val screenshotRequester by lazy { AndroidScreenshotFixture.createRequester() }
   private val gatewayAuthLifecycleLock = Any()
   private var gatewayAuthResetInProgress = false
   private var gatewayConnectOperationsInFlight = 0
@@ -1332,8 +1335,10 @@ class NodeRuntime private constructor(
   private val gatewayMethodsLock = Any()
   private var gatewayApprovalRpcFamily = GatewayApprovalRpcFamily.Unavailable
   private var gatewayAdvertisedMethods: Set<String>? = null
+  private var gatewayMethodCatalogPresent = false
   private var gatewayAdvertisedCapabilities: Set<String>? = null
-  private var gatewayMethodsEpoch = 0L
+  private val gatewayMethodsEpoch = MutableStateFlow(0L)
+  internal val gatewayCatalogRevision: StateFlow<Long> = gatewayMethodsEpoch.asStateFlow()
 
   @Volatile internal var gatewayDataRequestOverrideForTests: GatewayDataRequestOverride? = null
 
@@ -1510,8 +1515,9 @@ class NodeRuntime private constructor(
         when (mode) {
           NodeRuntimeMode.Live -> operatorSession.captureRequestLease(gatewayId)
           NodeRuntimeMode.ScreenshotFixture ->
-            GatewaySession.RequestLease(endpointStableId = AndroidScreenshotFixture.gatewayId) { method, paramsJson, _ ->
-              AndroidScreenshotFixture.request(method, paramsJson)
+            GatewaySession.RequestLease(endpointStableId = AndroidScreenshotFixture.gatewayId) { method, paramsJson, _, withEnqueue ->
+              withEnqueue {}
+              screenshotRequester(method, paramsJson)
             }
         }
       },
@@ -1684,7 +1690,7 @@ class NodeRuntime private constructor(
     _remoteAddress.value = null
     _gatewayVersion.value = null
     _gatewayUpdateAvailable.value = null
-    replaceGatewayMethods(null)
+    replaceGatewayMethods(null, present = false)
     replaceGatewayCapabilities(null)
     _operatorScopes.value = emptyList()
     _devicePairingCapabilities.value = GatewayDevicePairingCapabilities()
@@ -1935,6 +1941,7 @@ class NodeRuntime private constructor(
           currentDefaultAgentRevision = gatewayDefaultAgentRevision::get,
           gatewayAdvertisesMethod = ::gatewayAdvertisesMethod,
           gatewayAdvertisesCapability = ::gatewayAdvertisesCapability,
+          currentGatewayCatalogRevision = { gatewayMethodsEpoch.value },
           commandOutbox = chatCommandOutbox,
           recordModelRecent = prefs::recordModelRecent,
           onSessionDeleted = ::publishChatSessionDeletion,
@@ -1949,7 +1956,7 @@ class NodeRuntime private constructor(
         ChatController(
           scope = scope,
           json = json,
-          requestGateway = AndroidScreenshotFixture::request,
+          requestGateway = screenshotRequester,
           gatewayAdvertisesMethod = { _ -> true },
           gatewayAdvertisesCapability = { _ -> true },
         )
@@ -2600,7 +2607,6 @@ class NodeRuntime private constructor(
 
   internal fun installClawHubSkill(
     slug: String,
-    acknowledgeClawHubRisk: Boolean = false,
     version: String? = null,
   ): Job? {
     val normalized = slug.trim()
@@ -2608,7 +2614,6 @@ class NodeRuntime private constructor(
     return scope.launch {
       installClawHubSkillFromGateway(
         slug = normalized,
-        acknowledgeClawHubRisk = acknowledgeClawHubRisk,
         version = version,
       )
     }
@@ -2620,8 +2625,6 @@ class NodeRuntime private constructor(
       _clawHubSkillSearchState.value.copy(
         reviewingSlug = null,
         installReview = null,
-        acknowledgeSlug = null,
-        acknowledgeVersion = null,
         errorText = null,
         messageText = null,
       )
@@ -2863,6 +2866,7 @@ class NodeRuntime private constructor(
   private val secondaryGatewayConnectionsEnabled = MutableStateFlow(!initialReconnectSuppressed)
 
   val chatSessionKey: StateFlow<String> = chat.sessionKey
+  internal val chatSelectionGeneration: StateFlow<Long> = chat.selectionGeneration
   val chatSessionOwnerAgentId: StateFlow<String?> = chat.sessionOwnerAgentId
   internal val gatewayComposerDefaultAgentOwner: StateFlow<GatewayDefaultAgentOwner?> = chat.composerDefaultAgentOwner
   val chatSessionId: StateFlow<String?> = chat.sessionId
@@ -2900,12 +2904,17 @@ class NodeRuntime private constructor(
 
   fun deleteChatOutboxCommand(id: String) = chat.deleteOutboxCommand(id)
 
-  fun resolveChatQuestion(
-    id: String,
-    answers: Map<String, List<String>>,
-  ) = chat.resolveQuestion(id, answers)
+  fun updateChatQuestionDraft(
+    prompt: ChatQuestionPrompt,
+    update: (ChatQuestionDraft) -> ChatQuestionDraft,
+  ) = chat.updateQuestionDraft(prompt, update)
 
-  fun skipChatQuestion(id: String) = chat.skipQuestion(id)
+  fun resolveChatQuestion(
+    prompt: ChatQuestionPrompt,
+    answers: Map<String, List<String>>,
+  ) = chat.resolveQuestion(prompt, answers)
+
+  fun skipChatQuestion(prompt: ChatQuestionPrompt) = chat.skipQuestion(prompt)
 
   private fun applyScreenshotFixture() {
     check(BuildConfig.DEBUG) { "Android screenshot fixtures require a debug build" }
@@ -2961,7 +2970,7 @@ class NodeRuntime private constructor(
     // Screenshot mode parses gateway-shaped fixtures so UI navigation covers the live data contract.
     val list =
       json
-        .parseToJsonElement(AndroidScreenshotFixture.request("cron.list", null))
+        .parseToJsonElement(screenshotRequester("cron.list", null))
         .asObjectOrNull()
     return parseCronJobs(list?.get("jobs") as? JsonArray)
   }
@@ -2972,7 +2981,7 @@ class NodeRuntime private constructor(
   ) {
     val detail =
       json
-        .parseToJsonElement(AndroidScreenshotFixture.request("cron.get", cronJobGetParams(detailRequest.id)))
+        .parseToJsonElement(screenshotRequester("cron.get", cronJobGetParams(detailRequest.id)))
         .asObjectOrNull()
         ?.let(::parseGatewayCronJobDetail)
         ?.takeIf { it.id == detailRequest.id }
@@ -2987,7 +2996,7 @@ class NodeRuntime private constructor(
   private fun publishScreenshotCronHistory(request: CronJobDetailRequest) {
     val history =
       json
-        .parseToJsonElement(AndroidScreenshotFixture.request("cron.runs", cronJobGetParams(request.id)))
+        .parseToJsonElement(screenshotRequester("cron.runs", cronJobGetParams(request.id)))
         .asObjectOrNull()
     val runs = parseGatewayCronRunHistory(history?.get("entries") as? JsonArray)
     cronRunHistoryRequestGuard.publishIfCurrent(request) {
@@ -5101,7 +5110,14 @@ class NodeRuntime private constructor(
     attachments: List<OutgoingAttachment>,
   ): Boolean = chat.sendMessageAwaitAcceptance(message = message, thinkingLevel = thinking, attachments = attachments)
 
-  internal fun canSendForOwner(owner: ChatComposerOwner): Boolean = chat.canSendForOwner(owner)
+  internal fun canSendForOwner(owner: ChatComposerOwner): Boolean = chat.isCurrentComposerOwner(owner)
+
+  internal fun prepareFullMessageRead(
+    owner: ChatComposerOwner,
+    selectionGeneration: Long,
+    catalogRevision: Long,
+    message: ChatMessage,
+  ) = chat.prepareFullMessageRead(owner, selectionGeneration, catalogRevision, message)
 
   private suspend fun awaitConnectedGateway(stableId: String): Boolean {
     _isConnected.first { connected ->
@@ -5520,7 +5536,7 @@ class NodeRuntime private constructor(
         // Lock order stays gateway data -> method catalog -> approval state. The
         // explicit disconnect path already takes the first two in this order.
         synchronized(gatewayMethodsLock) {
-          if (methodsSnapshot.epoch == gatewayMethodsEpoch) {
+          if (methodsSnapshot.epoch == gatewayMethodsEpoch.value) {
             publish()
             approvalPublished = true
           }
@@ -6289,8 +6305,6 @@ class NodeRuntime private constructor(
           results = emptyList(),
           reviewingSlug = null,
           installReview = null,
-          acknowledgeSlug = null,
-          acknowledgeVersion = null,
           errorText = null,
           messageText = null,
         )
@@ -6345,8 +6359,6 @@ class NodeRuntime private constructor(
         _clawHubSkillSearchState.value.copy(
           reviewingSlug = skill.reference,
           installReview = null,
-          acknowledgeSlug = null,
-          acknowledgeVersion = null,
           errorText = null,
           messageText = null,
         )
@@ -6387,7 +6399,6 @@ class NodeRuntime private constructor(
 
   private suspend fun installClawHubSkillFromGateway(
     slug: String,
-    acknowledgeClawHubRisk: Boolean,
     version: String?,
   ) {
     val gatewayScope = captureGatewayDataScope()
@@ -6439,8 +6450,6 @@ class NodeRuntime private constructor(
       _clawHubSkillSearchState.value =
         _clawHubSkillSearchState.value.copy(
           installReview = null,
-          acknowledgeSlug = null,
-          acknowledgeVersion = null,
           errorText = null,
           messageText = null,
         )
@@ -6450,7 +6459,7 @@ class NodeRuntime private constructor(
         requestGatewayData(
           gatewayScope,
           "skills.install",
-          clawHubInstallParams(slug, attemptedVersion, acknowledgeClawHubRisk),
+          clawHubInstallParams(slug, attemptedVersion),
           timeoutMs = CLAWHUB_INSTALL_REQUEST_TIMEOUT_MS,
         )
       val root = json.parseToJsonElement(response).asObjectOrNull()
@@ -6493,12 +6502,10 @@ class NodeRuntime private constructor(
       }
     } catch (err: GatewayRequestRejected) {
       val confirmed = refreshAndConfirmClawHubInstall(gatewayScope, slug, attemptedVersion)
-      val rejection = if (confirmed) null else clawHubInstallRejection(err.gatewayError, attemptedVersion)
+      val rejection = if (confirmed) null else clawHubInstallRejection(err.gatewayError)
       publishGatewayData(gatewayScope) {
         _clawHubSkillSearchState.value =
           _clawHubSkillSearchState.value.copy(
-            acknowledgeSlug = if (rejection?.requiresAcknowledgement == true) slug else null,
-            acknowledgeVersion = rejection?.acknowledgeVersion,
             errorText = rejection?.let { formatClawHubInstallMessage(it.message, it.warning) },
             messageText = if (confirmed) "Installed $slug." else null,
           )
@@ -7505,15 +7512,22 @@ class NodeRuntime private constructor(
       ?: error("Malformed approval.get response")
   }
 
-  private fun replaceGatewayMethods(methods: Set<String>?) {
+  private fun replaceGatewayMethods(
+    methods: Set<String>?,
+    present: Boolean = true,
+  ) {
     synchronized(gatewayMethodsLock) {
+      // A hello may omit methods, so null alone does not mean disconnected. Retire
+      // each live catalog once; repeated failed reconnects must not dismiss offline UI.
+      if (!present && !gatewayMethodCatalogPresent) return
+      gatewayMethodCatalogPresent = present
       val advertisedMethods = methods.orEmpty()
       gatewayAdvertisedMethods = methods
       gatewayApprovalRpcFamily = selectGatewayApprovalRpcFamily(advertisedMethods)
       _clawHubSkillMethodsAvailable.value = supportsClawHubSkillManagement(advertisedMethods)
       _desktopObserveAvailable.value = GatewayMethod.DesktopObserve.rawValue in advertisedMethods
       systemAgentChatSupported.value = GatewayMethod.OpenclawChat.rawValue in advertisedMethods
-      gatewayMethodsEpoch += 1
+      gatewayMethodsEpoch.update { it + 1 }
     }
   }
 
@@ -7531,11 +7545,11 @@ class NodeRuntime private constructor(
     synchronized(gatewayMethodsLock) {
       GatewayMethodsSnapshot(
         approvalRpcFamily = gatewayApprovalRpcFamily,
-        epoch = gatewayMethodsEpoch,
+        epoch = gatewayMethodsEpoch.value,
       )
     }
 
-  private fun isGatewayMethodsSnapshotCurrent(snapshot: GatewayMethodsSnapshot): Boolean = synchronized(gatewayMethodsLock) { snapshot.epoch == gatewayMethodsEpoch }
+  private fun isGatewayMethodsSnapshotCurrent(snapshot: GatewayMethodsSnapshot): Boolean = synchronized(gatewayMethodsLock) { snapshot.epoch == gatewayMethodsEpoch.value }
 
   private fun pendingExecApprovalWrite(
     id: String,

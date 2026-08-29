@@ -131,11 +131,15 @@ in another process, so confirmation covers unknown clients and the gap between
 status read and archive. A supervised model-locked Chat cannot be deleted while
 it protects the native binding.
 
-Paired-node catalogs stay metadata-only in the initial release. The current
-node invoke boundary is request/response and cannot carry the long-lived turn
-events, approval requests, or streaming output required by a real Codex harness
-binding. Remote **Continue** and **Archive** therefore remain unavailable even
-when the row is idle.
+Paired-node catalogs expose bounded, paginated transcripts. Eligible stored or
+idle rows can also create or reopen a model-locked Chat when the connected node
+advertises and permits the catalog list, transcript read, and
+`codex.cli.session.resume` commands, and the operator has `operator.admin`.
+Later messages resume the exact native thread through the node's Codex CLI and
+return its final text; this is not the Gateway-local branch flow or a streaming
+App Server harness bridge. Nodes without those capabilities remain readable
+without continuation, and paired-node archive remains unavailable. See
+[paired-node limits](/plugins/codex-supervision#understand-paired-node-limits).
 
 See [Codex supervision](/plugins/codex-supervision) for operator setup and the
 visible Control UI behavior.
@@ -231,8 +235,12 @@ Gateway rejects authentication, cookie, API-key, and other sensitive HTTP
 headers before they reach the node; authenticated HTTP must run on the
 Gateway. The existing duplex node channel carries the Codex JSON-RPC stream
 without starting an OpenClaw worker child or consuming a worker slot. Explicit
-Gateway command allowlisting and separate per-attempt allow-once approval
-remain required. Each attempt owns an isolated Gateway app-server client so its
+Gateway command allowlisting remains required. Launch needs per-attempt
+allow-once approval or exact admitted session Full access with node-local
+full/off policy. Full access never overrides local deny, ask, or allowlist
+restrictions, pairing, hosting consent, command authorization, or tool policy.
+The node rechecks local policy immediately before spawning the pinned binary;
+a stale launch is refused. Each attempt owns an isolated Gateway app-server client so its
 remote environment registration retires with that attempt. Disconnect ends the
 active attempt and its remote processes; reconnect allows only a fresh
 attempt. Normal Codex turns work, but `/btw` side questions fail closed because
@@ -339,6 +347,11 @@ Active-run queue steering maps onto Codex app-server `turn/steer`. With the
 default `messages.queue.mode: "steer"`, OpenClaw batches steer-mode chat
 messages for the configured quiet window and sends them as one `turn/steer`
 request in arrival order.
+
+When Codex confirms consumption, OpenClaw saves completed visible assistant
+items before the steered user message, including items before a tool or sleep
+handoff. Each item keeps its own identity so later steers do not duplicate it.
+This history prefix is separate from the turn's final-answer selection.
 
 Codex review and manual compaction turns can reject same-turn steering. In
 that case, OpenClaw waits for the active run to finish before starting the
