@@ -320,7 +320,13 @@ VALIDATION_SHA="<full-commit-sha>"
 gh workflow run full-release-validation.yml --ref main \
   -f ref="$VALIDATION_SHA" \
   -f expected_sha="$VALIDATION_SHA"
+gh workflow run openclaw-config-schema.yml
 ```
+
+`OpenClaw Config Schema` is a manual-only workflow. It builds the CLI, runs
+`node openclaw.mjs config schema --json`, writes the document to
+`config/openclaw.json`, and uploads that path as the `openclaw-config-schema`
+Actions artifact. It does not commit the file.
 
 Gateway extended-stable runs npm preflight, Full Release Validation, and plugin
 npm release from `extended-stable/YYYY.M.33`; core publish consumes those three
