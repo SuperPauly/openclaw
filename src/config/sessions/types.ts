@@ -490,8 +490,6 @@ type SessionEntryCore = SessionRestartRecoveryState &
     /** Timestamp (ms) when `/tts latest` last sent audio for this session. */
     lastTtsReadLatestAt?: number;
     execHost?: string;
-    execSecurity?: string;
-    execAsk?: string;
     execNode?: string;
     /** Working directory interpreted only by the bound exec node. */
     execCwd?: string;
@@ -583,6 +581,8 @@ type SessionEntryCore = SessionRestartRecoveryState &
     label?: string;
     /** Persistent operator/agent-set sidebar emoji icon (single grapheme). */
     icon?: string;
+    /** Named sidebar tint (SESSION_COLOR_IDS); palette mirrors Claude Code /color for import. */
+    color?: string;
     /** User-defined organization bucket for session lists; unrelated to chat groupId/groupChannel. */
     category?: string;
     /** Preferred Control UI face when a caller opens this session without explicit face intent. */

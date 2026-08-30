@@ -99,8 +99,8 @@ channel is the communication surface.
 
 - The official `@openclaw/codex` plugin installed. Include `codex` in
   `plugins.allow` if your config uses an allowlist.
-- Managed Codex app-server `0.150.1`. The plugin ships and manages
-  `@openai/codex` `0.150.1` by default, so a `codex` command on `PATH` does not
+- Managed Codex app-server `0.151.0`. The plugin ships and manages
+  `@openai/codex` `0.151.0` by default, so a `codex` command on `PATH` does not
   affect normal startup. Explicit custom, remote, and macOS desktop-owned
   app-servers must report a parseable semantic version of `0.149.0` or newer.
   Newer versions continue with a compatibility warning and normal runtime
@@ -1003,6 +1003,10 @@ Common forms:
 - `/codex stop` stops the active turn; `/codex steer <text>` steers it.
 - `/codex model <model>`, `/codex fast [on|off|status]`, and
   `/codex permissions [default|yolo|status]` change per-conversation state.
+  The permissions argument `default` (also `guardian`, `guarded`, or `approve`)
+  selects `guarded`; it does not clear the session permission mode. `yolo`
+  selects full access and requires `operator.admin`, even for an owner sender.
+  Status displays `default` only when no session permission mode is set.
 - `/codex compact` runs the same completion and session-accounting pipeline as
   `/compact`, then reports whether Codex compacted the session and the resulting
   token count. If compaction is skipped or fails, the reply includes the reason.
