@@ -4,10 +4,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: openclaw-config-schema-${{ github.ref }}
+  # Every run writes to main, so serialize all schema-generation runs together.
+  group: openclaw-config-schema-main
   cancel-in-progress: true
 
 env:
@@ -22,6 +23,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Always generate from and update the repository's main branch.
+          ref: main
           persist-credentials: false
 
       - name: Setup Node environment
@@ -57,6 +60,30 @@ jobs:
           }
           console.log(`Wrote ${path} (${Buffer.byteLength(raw)} bytes)`);
           NODE
+
+      - name: Commit and push config schema
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add config/openclaw.json
+          if git diff --cached --quiet; then
+            echo "Schema is already up to date; nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "chore(config): update openclaw schema"
+
+          # checkout deliberately did not persist credentials, so authenticate only
+          # for this push using the short-lived workflow token.
+          git remote set-url origin \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin HEAD:main
 
       - name: Upload config schema
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
