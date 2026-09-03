@@ -7,8 +7,8 @@ name: Docs Mirror Freshness
 # one recovery sync.
 
 on:
-  schedule:
-    - cron: "17,47 * * * *"
+#  schedule:
+#    - cron: "17,47 * * * *"
   workflow_dispatch:
 
 permissions:
