@@ -131,12 +131,14 @@ export function registerPluginsCli(program: Command) {
 
   plugins
     .command("enable")
-    .description("Enable a plugin in config")
-    .argument("<id>", "Plugin id")
-    .option("--accept-capabilities", "Accept the plugin's declared capabilities", false)
-    .action(async (id: string, opts: { acceptCapabilities?: boolean }) => {
+    .description("Enable one or more plugins in config")
+    .argument("<ids...>", "Plugin ids")
+    .option("--accept-capabilities", "Accept each plugin's declared capabilities", false)
+    .action(async (ids: string[], opts: { acceptCapabilities?: boolean }) => {
       const { runPluginsEnableCommand } = await loadPluginsRuntime();
-      await runPluginsEnableCommand(id, opts);
+      for (const id of ids) {
+        await runPluginsEnableCommand(id, opts);
+      }
     });
 
   plugins
@@ -146,6 +148,17 @@ export function registerPluginsCli(program: Command) {
     .action(async (id: string) => {
       const { runPluginsDisableCommand } = await loadPluginsRuntime();
       await runPluginsDisableCommand(id);
+    });
+
+  plugins
+    .command("reload")
+    .description("Reload a plugin in the running Gateway")
+    .argument("<id>", "Plugin id")
+    .option("--accept-capabilities", "Accept changed declared capabilities", false)
+    .option("--json", "Print the applied runtime generation", false)
+    .action(async (id: string, opts: { json?: boolean; acceptCapabilities?: boolean }) => {
+      const { runPluginsReloadCommand } = await loadPluginsRuntime();
+      await runPluginsReloadCommand(id, opts);
     });
 
   plugins
@@ -253,7 +266,7 @@ export function registerPluginsCli(program: Command) {
 
   plugins
     .command("build")
-    .description("Generate simple tool plugin metadata")
+    .description("Build plugin metadata and native Control UI assets")
     .option("--root <path>", "Plugin package root")
     .option("--entry <path>", "Plugin entry module relative to --root")
     .option("--check", "Fail if generated metadata is out of date", false)
@@ -264,7 +277,7 @@ export function registerPluginsCli(program: Command) {
 
   plugins
     .command("validate")
-    .description("Validate simple tool plugin metadata")
+    .description("Validate plugin metadata and native Control UI assets")
     .option("--root <path>", "Plugin package root")
     .option("--entry <path>", "Plugin entry module relative to --root")
     .option("--json", "Print JSON")
@@ -274,12 +287,23 @@ export function registerPluginsCli(program: Command) {
     });
 
   plugins
+    .command("pack")
+    .description("Bundle a built plugin into an exact artifact for activation approval")
+    .option("--root <path>", "Plugin package root")
+    .option("--out <path>", "Output .tgz file (must not exist)")
+    .option("--json", "Print the artifact path, SHA256, and activation request")
+    .action(async (opts: import("./plugins-feature-artifact.js").PluginsPackOptions) => {
+      const { runPluginsPackCommand } = await import("./plugins-feature-artifact.js");
+      await runPluginsPackCommand(opts);
+    });
+
+  plugins
     .command("init")
     .description("Create a plugin project")
     .argument("<id>", "Plugin id")
     .option("--directory <path>", "Output directory")
     .option("--name <name>", "Display name")
-    .option("--type <type>", "Scaffold type (tool or provider)", "tool")
+    .option("--type <type>", "Scaffold type (tool, provider, or feature)", "tool")
     .option("--force", "Overwrite an existing output directory", false)
     .action(async (id: string, opts: PluginAuthoringInitOptions) => {
       const { runPluginsInitCommand } = await loadPluginsAuthoringCommands();

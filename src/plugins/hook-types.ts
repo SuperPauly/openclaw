@@ -1,4 +1,4 @@
-import type { AgentMessage } from "../agents/runtime/index.js";
+import type { AgentMessage } from "../../packages/agent-core/src/types.js";
 import type {
   GetReplyOptions,
   SourceReplyDeliveryMode,
@@ -14,6 +14,7 @@ import type { PrepareAssistantTranscriptMessage } from "../config/sessions/trans
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { TtsAutoMode } from "../config/types.tts.js";
 import type { DiagnosticTraceContext } from "../infra/diagnostic-trace-context.js";
+import type { InputProvenance } from "../sessions/input-provenance.js";
 import type {
   PluginHookBeforeModelResolveEvent,
   PluginHookBeforeModelResolveResult,
@@ -71,11 +72,7 @@ export type {
   PluginHookInboundMessageMetadata,
   PluginHookLocation,
   PluginHookMediaFact,
-  PluginHookMessageContext,
   PluginHookMessageReceivedEvent,
-  PluginHookMessageSendingEvent,
-  PluginHookMessageSendingResult,
-  PluginHookMessageSentEvent,
   PluginHookProviderUpdate,
 } from "./hook-message.types.js";
 export {
@@ -320,6 +317,11 @@ export type PluginHookAgentContext = {
   senderId?: string;
   trigger?: string;
   channelId?: string;
+  /**
+   * Typed origin of the turn's user-role input. Absent when the producer did not
+   * supply a classification; absence does not establish human origin.
+   */
+  inputProvenance?: InputProvenance;
   /** Resolved effective context-token budget after model/config/agent caps. */
   contextTokenBudget?: number;
   /** Source that supplied the resolved context-token budget. */
@@ -335,6 +337,11 @@ export type PluginHookAgentContext = {
   channelContext?: PluginHookChannelContext;
   /** Present only for post-policy prompt enrichment hooks that requested tool authority. */
   toolAuthority?: PluginHookToolAuthority;
+  /**
+   * Present for before_prompt_build only. Checks this handler's result-acceptance lifetime,
+   * not tool authorization or eventual model consumption. Underlying work is not cancelled.
+   */
+  readonly hookInvocation?: Readonly<{ assertActive(): void }>;
 };
 
 export type PluginHookContextWindowSource =
@@ -477,7 +484,7 @@ export type PluginHookBeforeAgentFinalizeResult = {
   };
 };
 
-export type PluginHookBeforeCompactionEvent = {
+type PluginHookBeforeCompactionEvent = {
   messageCount: number;
   compactingCount?: number;
   tokenCount?: number;
@@ -485,13 +492,13 @@ export type PluginHookBeforeCompactionEvent = {
   sessionFile?: string;
 };
 
-export type PluginHookBeforeResetEvent = {
+type PluginHookBeforeResetEvent = {
   sessionFile?: string;
   messages?: unknown[];
   reason?: string;
 };
 
-export type PluginHookAfterCompactionEvent = {
+type PluginHookAfterCompactionEvent = {
   messageCount: number;
   tokenCount?: number;
   compactedCount: number;
@@ -783,7 +790,7 @@ export type PluginHookBeforeMessageWriteResult = {
   message?: AgentMessage;
 };
 
-export type PluginHookSessionContext = {
+type PluginHookSessionContext = {
   agentId?: string;
   sessionId: string;
   sessionKey?: string;
@@ -818,7 +825,7 @@ export type PluginHookSessionEndEvent = {
   nextSessionKey?: string;
 };
 
-export type PluginHookSubagentContext = {
+type PluginHookSubagentContext = {
   runId?: string;
   childSessionKey?: string;
   requesterSessionKey?: string;
@@ -846,7 +853,7 @@ type PluginHookSubagentSpawnBase = {
   threadRequested: boolean;
 };
 
-export type PluginHookSubagentDeliveryTargetEvent = {
+type PluginHookSubagentDeliveryTargetEvent = {
   childSessionKey: string;
   requesterSessionKey: string;
   requesterOrigin?: {
@@ -874,7 +881,7 @@ export type PluginHookSubagentDeliveryTargetResult = {
   };
 };
 
-export type PluginHookSubagentSpawnedEvent = PluginHookSubagentSpawnBase & {
+type PluginHookSubagentSpawnedEvent = PluginHookSubagentSpawnBase & {
   runId: string;
   /** Fully resolved provider/model ref applied to the spawned child session. */
   resolvedModel?: string;
@@ -883,7 +890,7 @@ export type PluginHookSubagentSpawnedEvent = PluginHookSubagentSpawnBase & {
 };
 
 /** Portable channel presentation signal for one background child run. */
-export type PluginHookSubagentProgressEvent =
+type PluginHookSubagentProgressEvent =
   | {
       phase: "started";
       runId: string;
@@ -898,7 +905,7 @@ export type PluginHookSubagentProgressEvent =
       requester?: PluginHookSubagentRequester;
     };
 
-export type PluginHookSubagentEndedEvent = {
+type PluginHookSubagentEndedEvent = {
   targetSessionKey: string;
   targetKind: PluginHookSubagentTargetKind;
   reason: string;
@@ -922,7 +929,7 @@ export type PluginHookCronReconciledContext = PluginHookGatewayContext & {
   abortSignal: AbortSignal;
 };
 
-export type PluginHookGatewayStartEvent = {
+type PluginHookGatewayStartEvent = {
   port: number;
 };
 
@@ -1161,7 +1168,7 @@ export type PluginHookBeforeInstallEvent = {
   plugin?: PluginHookBeforeInstallPlugin;
 };
 
-export type PluginHookBeforeInstallResult = {
+type PluginHookBeforeInstallResult = {
   findings?: PluginInstallFinding[];
   block?: boolean;
   blockReason?: string;

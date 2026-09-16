@@ -1,4 +1,3 @@
-// Google provider module implements model/runtime integration.
 import { randomUUID } from "node:crypto";
 import {
   ActivityHandling,
@@ -44,7 +43,7 @@ import {
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   realtimeVoiceAudioDurationMs,
   resamplePcm,
-} from "openclaw/plugin-sdk/realtime-voice";
+} from "openclaw/plugin-sdk/realtime-voice-provider";
 import { warn } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-input";
 import {
@@ -57,9 +56,12 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { canonicalizeGoogleProviderBase64 } from "./base64.js";
 import { createGoogleGenAI } from "./google-genai-runtime.js";
+import {
+  GOOGLE_REALTIME_DEFAULT_MODEL,
+  GOOGLE_REALTIME_VOICE_METADATA,
+} from "./realtime-voice-metadata.js";
 import { resolveGoogleGemini3ThinkingLevel } from "./thinking-api.js";
 
-const GOOGLE_REALTIME_DEFAULT_MODEL = "gemini-3.1-flash-live-preview";
 const GOOGLE_REALTIME_DEFAULT_VOICE = "Kore";
 const GOOGLE_REALTIME_DEFAULT_API_VERSION = "v1beta";
 const GOOGLE_REALTIME_INPUT_SAMPLE_RATE = 16_000;
@@ -478,6 +480,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private sessionReadyFired = false;
   private consecutiveSilenceMs = 0;
   private audioStreamEnded = false;
+  private responseInterrupted = false;
   private pendingFunctionNames = new Map<string, string>();
   private seenFunctionCallIds = new Set<string>();
   private pendingToolResponses: GooglePendingToolResponse[] = [];
@@ -549,6 +552,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
       this.config.sessionResumption !== false && Boolean(this.resumptionHandle);
     this.resumingSession = resumesExistingSession;
     if (!resumesExistingSession) {
+      this.responseInterrupted = false;
       this.resetToolCallOwnership();
     }
     const ai = createGoogleGenAI({
@@ -871,12 +875,16 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private handleMessage(message: LiveServerMessage): void {
+    const owner = this.connectionOwner;
     this.captureSessionLifecycle(message);
     if (message.setupComplete) {
       this.handleSetupComplete();
     }
     if (message.serverContent) {
       this.handleServerContent(message.serverContent);
+      if (this.connectionOwner !== owner) {
+        return;
+      }
     }
     if (message.toolCall) {
       this.handleToolCall(message.toolCall);
@@ -943,6 +951,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private handleServerContent(content: LiveServerContent): void {
     const owner = this.connectionOwner;
     if (content.interrupted) {
+      this.responseInterrupted = true;
       this.config.onClearAudio("barge-in");
       if (this.connectionOwner !== owner) {
         return;
@@ -990,6 +999,13 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
     // is independently ordered and must not be finalized by an assistant turn.
     if (content.generationComplete || content.interrupted || content.turnComplete) {
       this.flushPendingTranscript("assistant");
+    }
+    if (content.turnComplete && this.connectionOwner === owner) {
+      // Google finishes interrupted turns with turnComplete too. generationComplete
+      // can precede playback completion, so only the native turn boundary releases output.
+      const status = this.responseInterrupted ? "cancelled" : "completed";
+      this.responseInterrupted = false;
+      this.config.onResponseDone?.({ status });
     }
   }
 
@@ -1051,6 +1067,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private resetPendingTranscripts(): void {
+    this.responseInterrupted = false;
     this.pendingTranscripts.user = { text: "", byteCount: 0 };
     this.pendingTranscripts.assistant = { text: "", byteCount: 0 };
   }
@@ -1091,6 +1108,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
       return;
     }
     this.clearPendingAudio();
+    this.responseInterrupted = false;
     this.closeNotified = true;
     this.config.onClose?.(reason);
   }
@@ -1374,10 +1392,7 @@ async function createGoogleRealtimeBrowserSession(
 
 export function buildGoogleRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {
   return {
-    id: "google",
-    label: "Google Live Voice",
-    defaultModel: GOOGLE_REALTIME_DEFAULT_MODEL,
-    autoSelectOrder: 20,
+    ...GOOGLE_REALTIME_VOICE_METADATA,
     capabilities: {
       transports: ["provider-websocket", "gateway-relay"],
       inputAudioFormats: [

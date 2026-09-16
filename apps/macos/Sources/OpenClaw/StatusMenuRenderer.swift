@@ -277,6 +277,9 @@ final class StatusMenuRenderer: NSObject {
         case .settings:
             title = String(localized: "Settings…")
             symbol = "gearshape"
+        case .connection:
+            title = String(localized: "Connection…")
+            symbol = "point.3.connected.trianglepath.dotted"
         case .debug:
             title = String(localized: "Debug")
             symbol = "ladybug"
@@ -334,11 +337,13 @@ final class StatusMenuRenderer: NSObject {
         case .talkMode:
             Task { await self.state.setTalkEnabled(!self.state.talkEnabled) }
         case .allSessions:
-            Task { await DashboardManager.shared.show(atPath: DashboardRouteMap.sessionsPagePath) }
+            AppNavigationActions.openPrimaryWebRoute(DashboardRouteMap.sessionsPagePath)
         case .settings:
             AppNavigationActions.openSettings()
+        case .connection:
+            AppNavigationActions.openConnection()
         case .about:
-            AppNavigationActions.openSettings(tab: .about)
+            AppNavigationActions.openAbout()
         case .quit:
             AppDelegate.requestTermination()
         case .debug:
@@ -368,7 +373,7 @@ final class StatusMenuRenderer: NSObject {
             "checkmark.shield"))
         #endif
 
-        if self.state.connectionMode == .remote {
+        if self.state.connectionMode == .remote, self.state.remoteTransport == .ssh {
             entries.append(self.debugItem(
                 "tunnel",
                 String(localized: "Reset Remote Tunnel"),
