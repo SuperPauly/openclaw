@@ -13,12 +13,15 @@ import {
   stripInterSessionPromptPrefixForDisplay,
 } from "../sessions/input-provenance.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
+import { projectAssistantDisplayContent } from "../shared/assistant-display-content.js";
+import { extractAssistantPhaseText } from "../shared/chat-message-content.js";
 import { isOpenClawDeliveryMirrorAssistantMessage } from "../shared/transcript-only-openclaw-assistant.js";
 import { extractChatHistoryBlockText } from "./chat-display-projection.canvas.js";
 import {
   asRoleContentMessage,
   extractProjectedText,
   hasAssistantNonTextContent,
+  hasAssistantDisplayableNonTextContent,
   hasTranscriptMediaFacts,
   isEmptyTextOnlyContent,
   isProjectedSessionsSendForwardedMessage,
@@ -73,6 +76,15 @@ function readAssistantTtsSupplementMarker(
     }
   }
   return hasSupplementBlock ? marker : undefined;
+}
+
+/** Recognize stored supplements using the same display content as full history. */
+export function isAssistantTtsSupplementMessage(message: unknown): boolean {
+  const record = readRecord(message);
+  return (
+    record !== undefined &&
+    readAssistantTtsSupplementMarker(projectAssistantDisplayContent(record)) !== undefined
+  );
 }
 
 function readTtsSupplementTargetText(message: Record<string, unknown>): string {
@@ -157,7 +169,10 @@ export function mergeTtsSupplementMessages(
 
 function isSubagentAnnounceInterSessionUserMessage(message: Record<string, unknown>): boolean {
   const provenance = normalizeInputProvenance(message.provenance);
-  if (provenance?.kind === "inter_session" && provenance.sourceTool === "subagent_announce") {
+  if (
+    provenance?.kind === "inter_session" &&
+    (provenance.sourceTool === "subagent_announce" || provenance.sourceTool === "subagent_settle")
+  ) {
     return true;
   }
   const text = extractProjectedText(message.content ?? message.text);
@@ -177,7 +192,10 @@ function isSubagentAnnounceInterSessionUserChatHistoryMessage(message: unknown):
     return false;
   }
   const provenance = normalizeInputProvenance(record.provenance);
-  if (provenance?.kind === "inter_session" && provenance.sourceTool === "subagent_announce") {
+  if (
+    provenance?.kind === "inter_session" &&
+    (provenance.sourceTool === "subagent_announce" || provenance.sourceTool === "subagent_settle")
+  ) {
     return true;
   }
   const text = extractChatHistoryBlockText(record);
@@ -192,38 +210,45 @@ function isChatHistoryAssistantMessage(message: unknown): boolean {
   return readRecord(message)?.role === "assistant";
 }
 
+export function createPreSessionStartAnnouncePairFilter(sessionStartedAt: number | undefined) {
+  let precedingAnnounce = false;
+  return (messages: unknown[]): unknown[] => {
+    if (sessionStartedAt === undefined || messages.length === 0) {
+      return messages;
+    }
+    let changed = false;
+    const kept: unknown[] = [];
+    for (const current of messages) {
+      if (precedingAnnounce) {
+        precedingAnnounce = false;
+        const ts = isChatHistoryAssistantMessage(current)
+          ? readChatHistoryRecordTimestampMs(current)
+          : undefined;
+        if (typeof ts === "number" && ts < sessionStartedAt) {
+          changed = true;
+          continue;
+        }
+      }
+      if (isSubagentAnnounceInterSessionUserChatHistoryMessage(current)) {
+        const ts = readChatHistoryRecordTimestampMs(current);
+        if (typeof ts === "number" && ts < sessionStartedAt) {
+          // The adjacent assistant may arrive in the next appended chunk.
+          precedingAnnounce = true;
+          changed = true;
+          continue;
+        }
+      }
+      kept.push(current);
+    }
+    return changed ? kept : messages;
+  };
+}
+
 export function dropPreSessionStartAnnouncePairs(
   messages: unknown[],
   sessionStartedAt: number | undefined,
 ): unknown[] {
-  if (sessionStartedAt === undefined || messages.length === 0) {
-    return messages;
-  }
-  let changed = false;
-  const kept: unknown[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const current = messages[i];
-    if (isSubagentAnnounceInterSessionUserChatHistoryMessage(current)) {
-      const ts = readChatHistoryRecordTimestampMs(current);
-      if (typeof ts === "number" && ts < sessionStartedAt) {
-        const next = messages[i + 1];
-        const nextTs = readChatHistoryRecordTimestampMs(next);
-        if (
-          isChatHistoryAssistantMessage(next) &&
-          typeof nextTs === "number" &&
-          nextTs < sessionStartedAt
-        ) {
-          // Skip only an assistant reply that is also pre-session-start; recent
-          // or timestampless assistants may be real fresh-session context.
-          i++;
-        }
-        changed = true;
-        continue;
-      }
-    }
-    kept.push(current);
-  }
-  return changed ? kept : messages;
+  return createPreSessionStartAnnouncePairFilter(sessionStartedAt)(messages);
 }
 
 function isDisplayHiddenProjectedMessage(message: Record<string, unknown>): boolean {
@@ -233,14 +258,17 @@ function isDisplayHiddenProjectedMessage(message: Record<string, unknown>): bool
   return message.role === "custom" && message.customType === OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE;
 }
 
-function shouldHideProjectedHistoryMessage(message: Record<string, unknown>): boolean {
+function shouldHideProjectedHistoryMessage(
+  message: Record<string, unknown>,
+  roleContent: RoleContentMessage | null,
+  heartbeatUser: boolean,
+): boolean {
   if (isDisplayHiddenProjectedMessage(message)) {
     return true;
   }
   if (isProjectedSessionsSendForwardedMessage(message)) {
     return false;
   }
-  const roleContent = asRoleContentMessage(message);
   if (!roleContent) {
     return false;
   }
@@ -260,10 +288,7 @@ function shouldHideProjectedHistoryMessage(message: Record<string, unknown>): bo
   if (roleContent.role === "assistant" && isEmptyTextOnlyContent(message.content ?? message.text)) {
     return false;
   }
-  if (isHeartbeatUserMessage(roleContent, HEARTBEAT_PROMPT)) {
-    return true;
-  }
-  return isHeartbeatOkResponse(roleContent);
+  return heartbeatUser || isHeartbeatOkResponse(roleContent);
 }
 
 /** Identifies the hidden native input that starts a heartbeat-driven turn. */
@@ -349,6 +374,21 @@ function isDuplicateChannelFinalDeliveryMirror(
     return false;
   }
   const previousMeta = readRecord(previousVisible["__openclaw"]);
+  if (typeof deliveryMirror.sourceAssistantMessageId === "string") {
+    if (
+      !deliveryMirror.sourceAssistantMessageId ||
+      deliveryMirror.sourceAssistantMessageId !== previousMeta?.id ||
+      hasAssistantDisplayableNonTextContent(previousVisible) ||
+      hasAssistantNonTextContent(current) ||
+      hasTranscriptMediaFacts(previousVisible) ||
+      hasTranscriptMediaFacts(current)
+    ) {
+      return false;
+    }
+    const previousText = extractAssistantPhaseText(previousVisible)?.trim();
+    const currentText = extractAssistantPhaseText(current)?.trim();
+    return Boolean(previousText && currentText && previousText === currentText);
+  }
   if (typeof previousMeta?.mirrorIdentity !== "string" || !previousMeta.mirrorIdentity.trim()) {
     return false;
   }
@@ -361,10 +401,10 @@ function isDuplicateChannelFinalDeliveryMirror(
 }
 
 export function toProjectedMessages(messages: unknown[]): Array<Record<string, unknown>> {
-  return messages.filter(
-    (message): message is Record<string, unknown> =>
-      Boolean(message) && typeof message === "object" && !Array.isArray(message),
-  );
+  return messages.flatMap((message) => {
+    const record = readRecord(message);
+    return record ? [projectAssistantDisplayContent(record)] : [];
+  });
 }
 
 export function filterVisibleProjectedHistoryMessages(
@@ -386,13 +426,14 @@ export function filterVisibleProjectedHistoryMessages(
       continue;
     }
     const currentRoleContent = asRoleContentMessage(current);
-    const next = messages[i + 1];
+    const heartbeatUser = Boolean(
+      currentRoleContent && isHeartbeatUserMessage(currentRoleContent, HEARTBEAT_PROMPT),
+    );
+    const next = heartbeatUser ? messages[i + 1] : undefined;
     const nextRoleContent = next ? asRoleContentMessage(next) : null;
     if (
-      currentRoleContent &&
       next &&
       nextRoleContent &&
-      isHeartbeatUserMessage(currentRoleContent, HEARTBEAT_PROMPT) &&
       isHeartbeatOkResponse(nextRoleContent) &&
       !isProjectedSessionsSendForwardedMessage(next)
     ) {
@@ -401,9 +442,9 @@ export function filterVisibleProjectedHistoryMessages(
       i++;
       continue;
     }
-    if (shouldHideProjectedHistoryMessage(current)) {
+    if (shouldHideProjectedHistoryMessage(current, currentRoleContent, heartbeatUser)) {
       changed = true;
-      pendingTurnBoundary ||= isHeartbeatHistoryTurnBoundaryMessage(current);
+      pendingTurnBoundary ||= heartbeatUser && !isSessionsSendInterSessionUserMessage(current);
       continue;
     }
     if (
@@ -459,13 +500,17 @@ function extractPromptPrefixField(text: string, field: string): string | undefin
   return normalizeOptionalString(match?.[1]);
 }
 
-function resolveSessionsSendForwardedSenderLabel(message: Record<string, unknown>): string {
+function resolveSessionsSendForwardedSenderSession(
+  message: Record<string, unknown>,
+): { sessionKey?: string; agentId?: string } | undefined {
   const provenance = normalizeInputProvenance(message.provenance);
   const text = extractProjectedText(message.content ?? message.text);
   const sourceSessionKey =
     provenance?.sourceSessionKey ?? extractPromptPrefixField(text, "sourceSession");
   const agentId = parseAgentSessionKey(sourceSessionKey)?.agentId;
-  return agentId ? `Forwarded from ${agentId}` : "Forwarded agent message";
+  return sourceSessionKey
+    ? { sessionKey: sourceSessionKey, ...(agentId ? { agentId } : {}) }
+    : undefined;
 }
 
 export function projectSessionsSendInterSessionMessages(
@@ -477,10 +522,14 @@ export function projectSessionsSendInterSessionMessages(
       return message;
     }
     changed = true;
+    const senderSession = resolveSessionsSendForwardedSenderSession(message);
     const next: Record<string, unknown> = {
       ...message,
       role: "assistant",
-      senderLabel: resolveSessionsSendForwardedSenderLabel(message),
+      senderLabel: senderSession?.agentId
+        ? `Forwarded from ${senderSession.agentId}`
+        : "Forwarded agent message",
+      ...(senderSession ? { senderSession } : {}),
     };
     if ("content" in next) {
       next.content = stripInterSessionPromptPrefixFromContent(next.content);

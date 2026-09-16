@@ -27,6 +27,7 @@ import {
   getPreparedTelegramPollAnswer,
   isEligibleTelegramPollAnswerUpdate,
   prepareTelegramPollAnswerContext,
+  prepareTelegramPollAnswerContextAsync,
   recordPreparedTelegramPollAnswer,
   settleTelegramPollAnswerContext,
 } from "./poll-answer-context.js";
@@ -247,7 +248,7 @@ function canReconcileTelegramLegacyLane(params: {
   );
 }
 
-export type TelegramIngressDrainLifecycle = Omit<
+type TelegramIngressDrainLifecycle = Omit<
   ChannelIngressMonitorLifecycle,
   "admission" | "onFailed" | "onCancelled"
 > & {
@@ -262,13 +263,14 @@ type TelegramIngressDrainDispatch = (
 
 type CreateTelegramIngressMonitorParams = {
   queue: ChannelIngressQueue<TelegramSpooledUpdatePayload>;
-  /** Required for authorization-gated supersede (numeric allowlist). */
-  cfg: OpenClawConfig;
+  /** Read committed policy for every supersession decision, including after reconnect. */
+  getConfig: () => OpenClawConfig;
   accountId: string;
   botInfo?: TelegramBotInfo;
   adoptionStallTimeoutMs?: number;
   pollIntervalMs?: number;
   dispatch: TelegramIngressDrainDispatch;
+  onDurableAdmission?: (update: unknown, context: { isNew: boolean }) => void | Promise<void>;
   onLog?: (message: string) => void;
   onError?: (error: unknown) => void;
   abortSignal?: AbortSignal;
@@ -296,6 +298,21 @@ export function createTelegramIngressMonitor(params: CreateTelegramIngressMonito
         isEligibleTelegramPollAnswerUpdate(update)
       ) {
         prepareTelegramPollAnswerContext({ update, accountId: params.accountId });
+      }
+      return inspectTelegramSpooledUpdate(
+        update,
+        params.botInfo,
+        context.phase === "claim" ? context.claimedLaneKey : undefined,
+      );
+    },
+    inspectAsync: async (update, context) => {
+      if (
+        context.phase === "admission" &&
+        typeof update === "object" &&
+        update !== null &&
+        isEligibleTelegramPollAnswerUpdate(update)
+      ) {
+        await prepareTelegramPollAnswerContextAsync({ update, accountId: params.accountId });
       }
       return inspectTelegramSpooledUpdate(
         update,
@@ -462,7 +479,7 @@ export function createTelegramIngressMonitor(params: CreateTelegramIngressMonito
       startLimit: TELEGRAM_SPOOLED_DRAIN_START_LIMIT,
       resolveNonRetryableFailure: resolveTelegramIngressNonRetryableFailure,
       shouldSupersedePending: createShouldSupersedeTelegramSpooledPending({
-        cfg: params.cfg,
+        getConfig: params.getConfig,
         accountId: params.accountId,
         ...(params.botInfo?.username ? { botUsername: params.botInfo.username } : {}),
       }),
@@ -480,6 +497,7 @@ export function createTelegramIngressMonitor(params: CreateTelegramIngressMonito
     ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
     admissionMode: "while-running",
     createStoppedError: () => new Error("Telegram ingress monitor is stopped."),
+    ...(params.onDurableAdmission ? { onDurableAdmission: params.onDurableAdmission } : {}),
     ...(params.onError ? { onError: params.onError } : {}),
   });
 }

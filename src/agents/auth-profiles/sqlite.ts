@@ -9,6 +9,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { safeParseJson } from "@openclaw/normalization-core";
 import { resolveStateDir } from "../../config/paths.js";
 import { sha256HexPrefixCore } from "../../infra/crypto-digest.js";
+import { executeWithCachedStatement } from "../../infra/kysely-sync-cache-state.js";
 import {
   clearNodeSqliteKyselyCacheForDatabase,
   enableNodeSqliteKyselyStatementCache,
@@ -21,6 +22,11 @@ import { isPathInside } from "../../infra/path-guards.js";
 import { resolveSqliteDatabaseFilePaths } from "../../infra/sqlite-files.js";
 import { readSqliteUserVersion } from "../../infra/sqlite-user-version.js";
 import { registerSqliteCacheExitClose } from "../../infra/sqlite-wal.js";
+import { normalizeAgentId } from "../../routing/session-key.js";
+import {
+  assertExistingAgentSchemaOwner,
+  readExistingAgentSchemaMeta,
+} from "../../state/openclaw-agent-db-schema-helpers.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import {
   deferOpenClawAgentPostCommitPublication,
@@ -180,31 +186,26 @@ function resolveAuthProfileDatabaseOptions(
   agentDir?: string,
   env: NodeJS.ProcessEnv = process.env,
 ): AuthProfileDatabaseTarget {
-  if (!agentDir) {
-    const pathname = resolveSharedAuthStorePath(env);
-    if (resolveSharedAuthStoreOwnership(env).location === "state-db") {
-      return { kind: "shared-state", path: pathname, env };
-    }
-    const dir = path.dirname(pathname);
-    return {
-      kind: "agent",
-      agentId: resolveRegisteredAgentIdForDir(dir) ?? inferAgentIdFromDir(dir),
-      path: pathname,
-      env,
-    };
+  const pathname = agentDir
+    ? resolveAuthProfileDatabasePath(agentDir)
+    : resolveSharedAuthStorePath(env);
+  if (!agentDir && resolveSharedAuthStoreOwnership(env).location === "state-db") {
+    return { kind: "shared-state", path: pathname, env };
   }
-  const dir = resolveUserPath(agentDir);
+  const dir = path.dirname(pathname);
   return {
     kind: "agent",
     agentId: resolveRegisteredAgentIdForDir(dir) ?? inferAgentIdFromDir(dir),
-    path: path.join(dir, "openclaw-agent.sqlite"),
+    path: pathname,
     env,
   };
 }
 
-/** Resolves the SQLite database path that stores auth profiles for an agent dir. */
+/** Filename-only consumers do not need reverse agent ownership discovery. */
 export function resolveAuthProfileDatabasePath(agentDir: string): string {
-  return resolveAuthProfileDatabaseOptions(agentDir).path;
+  return agentDir
+    ? path.join(resolveUserPath(agentDir), "openclaw-agent.sqlite")
+    : resolveSharedAuthStorePath();
 }
 
 /** Resolves the durable agent owner expected for an auth-profile database. */
@@ -267,9 +268,12 @@ function inspectAuthProfileTable(
       : target === "store"
         ? "auth_profile_store"
         : "auth_profile_state";
-  const schemaObject = db
-    .prepare("SELECT type FROM sqlite_master WHERE name = ?")
-    .get(tableName) as { type?: unknown } | undefined;
+  const schemaObject = executeWithCachedStatement(
+    db,
+    "SELECT type FROM sqlite_master WHERE name = ?",
+    [tableName],
+    (statement) => statement.get(tableName),
+  ) as { type?: unknown } | undefined;
   if (!schemaObject) {
     // Agent databases shipped before SQLite auth storage do not have these
     // additive tables until their next writable bootstrap.
@@ -421,6 +425,23 @@ function acquireAuthProfileReadDatabase(
   authProfileReadDatabases.set(resolvedPath, db);
   unregisterReadHandleExitClose ??= registerSqliteCacheExitClose(closeAuthProfileReadPool);
   return { status: "readable", db };
+}
+
+/** Validate selected-agent ownership without requiring a current session schema. */
+export function assertAuthProfileStoreAgentOwner(agentDir: string, agentId: string): void {
+  const pathname = resolveAuthProfileDatabasePath(agentDir);
+  const acquired = acquireAuthProfileReadDatabase(pathname);
+  if (acquired.status === "missing") {
+    return;
+  }
+  if (acquired.status === "unreadable") {
+    throw new Error(`Unable to read agent auth database ${pathname}.`);
+  }
+  assertExistingAgentSchemaOwner(
+    readExistingAgentSchemaMeta(acquired.db),
+    normalizeAgentId(agentId),
+    pathname,
+  );
 }
 
 export function inspectAuthProfileJsonCellReadOnly(

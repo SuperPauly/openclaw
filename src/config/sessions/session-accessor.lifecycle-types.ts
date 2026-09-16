@@ -1,8 +1,12 @@
 import type { OpenClawConfig } from "../types.openclaw.js";
 import type { ConversationRouteContext } from "./conversation-route-context.js";
 import type { SessionStateDeleteSnapshot } from "./session-accessor.sqlite-delete-snapshot.types.js";
+import type { TranscriptDigest } from "./session-accessor.sqlite-transcript-digest.types.js";
 import type { SessionResetBoundaryRequest } from "./session-reset-boundary-event.js";
 import type { InternalSessionEntry as SessionEntry } from "./types.js";
+
+/** Reset is an append: an empty transcript needs the caller's workspace for its header. */
+export type SessionResetBoundaryWrite = SessionResetBoundaryRequest & { cwd: string };
 
 export type SessionLifecycleArtifactCleanupParams = {
   agentId?: string;
@@ -48,6 +52,8 @@ export type ResetSessionEntryLifecycleMutation = Omit<
 >;
 
 export type ResetSessionEntryLifecycleParams = {
+  /** Revalidate caller authority before preparation and synchronous reset commit. */
+  commitGuard?: () => void;
   /** Preserve legacy rotation archival unless the caller appended an in-log boundary. */
   archivePreviousTranscript?: boolean;
   /** Runs after the persisted entry changes and any requested archival completes. */
@@ -60,7 +66,7 @@ export type ResetSessionEntryLifecycleParams = {
     primaryKey: string;
   }) => Promise<SessionEntry> | SessionEntry;
   /** Atomically append this boundary with the reset entry mutation. */
-  resetBoundary?: SessionResetBoundaryRequest;
+  resetBoundary?: SessionResetBoundaryWrite;
   /** Explicit store target for SQLite session ownership. */
   storePath: string;
   /** Canonical key plus aliases that identify the logical entry. */
@@ -76,7 +82,10 @@ export type DeleteSessionEntryLifecycleResult = {
 };
 
 export type DeleteSessionEntryLifecycleParams = {
-  /** Revalidate caller and external lifecycle owners at each synchronous deletion boundary. */
+  /**
+   * Revalidate caller and external lifecycle owners at each synchronous deletion boundary.
+   * Must not write the deleting agent database: its Worker may hold the transaction lock.
+   */
   commitGuard?: () => void;
   /** Agent owner used to resolve backend transcript artifacts. */
   agentId?: string;
@@ -89,7 +98,7 @@ export type DeleteSessionEntryLifecycleParams = {
   /** Optional exact row guard checked under the storage writer lock. */
   expectedEntry?: SessionEntry;
   /** Optional exact ordered transcript guard checked in the deleting SQLite transaction. */
-  expectedTranscript?: { sessionId: string; eventJson: readonly string[] };
+  expectedTranscript?: { sessionId: string; digest: TranscriptDigest };
   /** Optional provider-run identity guard checked under the storage writer lock. */
   expectedSessionId?: string | null;
   /** Optional owner revision guard checked under the storage writer lock. */
@@ -146,7 +155,7 @@ export type SessionEntryLifecycleUpsert = {
   requiresRemovalSessionKey?: string;
   /** Authoritative route observation for this write; omitted writes preserve valid evidence. */
   routeContext?: ConversationRouteContext | null;
-  resetBoundary?: SessionResetBoundaryRequest;
+  resetBoundary?: SessionResetBoundaryWrite;
 } & (
   | {
       entry: SessionEntry;
@@ -156,7 +165,6 @@ export type SessionEntryLifecycleUpsert = {
       buildEntry: (context: {
         currentEntry?: SessionEntry;
         sessionKey: string;
-        store: Record<string, SessionEntry>;
       }) => Promise<SessionEntry | null | undefined> | SessionEntry | null | undefined;
       entry?: never;
     }
@@ -172,6 +180,7 @@ export type SessionEntryLifecycleMutationResult = {
   removedEntries: number;
   removedSessionKeys: string[];
   archived: number;
+  capArchived?: number;
   modelRunPruned: number;
   pruned: number;
   capped: number;
@@ -182,6 +191,7 @@ export type SessionEntryLifecycleMutationResult = {
 
 export type DeletedAgentSessionEntryPurgeParams = {
   cfg: OpenClawConfig;
+  env?: NodeJS.ProcessEnv;
   agentId: string;
   storeAgentId: string;
   storePath: string;
