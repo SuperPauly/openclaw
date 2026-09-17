@@ -24,11 +24,25 @@ and publishes the result. Avoid exposing a generic SQL callback to application
 code or adding an asynchronous wrapper around an existing asynchronous facade.
 The plugin KV API already has asynchronous methods over its SQLite owner.
 
+Plugin conversation standing approvals load and upsert in the shared-state worker.
+Core publishes an always-allow grant only after durable completion, serializes cache
+fills with grant publication, and joins admitted binding operations before lifecycle
+reset clears the cache. Requests recheck conversation ownership after storage waits.
+Approval scope, one-use decisions, channel binding APIs, and Doctor imports are unchanged.
+
 Copilot SDK session bindings use these worker-backed data operations. The harness
 serializes binding reads, writes, and in-memory publication per OpenClaw session;
 reset and shutdown join admitted binding work and deferred compaction cleanup.
 Failed persistence retains the existing in-memory fallback. Binding formats,
 compatibility checks, namespace limits, and expiry remain unchanged.
+
+Hosted official plugin-catalog snapshots read and write in the shared-state worker.
+Missing-state reads do not create a database. The existing write transaction rereads
+the current snapshot before checking signed-feed sequence and payload consistency.
+The hosted loader receives the same monotonicity error type, so rejected writes
+retain the accepted snapshot. Marketplace refresh awaits persistence before clearing
+its catalog cache and applying the result to the Gateway. Feed verification, expired
+snapshot visibility, install authority, and the stored representation are unchanged.
 
 Asynchronous mutable cron-store loads run in the shared-state worker, including
 the existing retired-job deletion and runtime-authority repairs. The connection-bound
@@ -338,11 +352,12 @@ per-read admission and committed-row checks without caching visibility decisions
 Other cold readers outside the history worker and extension-capable readers
 remain one-shot; incognito reads retain their existing process-local owner.
 
-The history worker retains one read-only connection across requests, rechecking
+The history worker retains up to 64 read-only connections across requests, rechecking
 schema, agent owner, and physical file identity before reuse. Every request keeps
-its own snapshot and current admission checks. Switching databases closes the
-previous connection. The parent retires the worker after 30 minutes without
-pending history reads; database cleanup revokes admission and joins native worker
+its own snapshot and current admission checks. Switching databases reuses their
+connections; admitting another retained connection evicts the least recently used
+one. Missing databases consume no retained slot. The parent keeps custody of all
+retained targets and retires the worker after 30 minutes without pending history reads; database cleanup revokes admission and joins native worker
 exit before closing the database. Cold restoration carries the request's same
 authority through queue waits and its native commit, so a revoked read cannot
 restore rows after database cleanup. These lifetimes change no schema or
